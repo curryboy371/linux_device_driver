@@ -1,10 +1,14 @@
+// pr_debug, pr_info, pr_err 메시지 접두사 macro
+#define pr_fmt(fmt) "[my_i2c] " fmt
+
 #include <linux/module.h>        // module_init, module_exit, MODULE_LICENSE 등
 #include <linux/fs.h>            // character device
 #include <linux/cdev.h>          // cdev
 #include <linux/gpio.h>          // gpio 사용
 #include <linux/device.h>        // device 등록
 
-//#include <linux/delay.h>         // udelay
+#include <linux/uaccess.h>   // copy_from_user, copy_to_user
+#include <linux/delay.h>         // udelay
 
 #include <linux/kernel.h> // pr log
 
@@ -22,10 +26,67 @@ static dev_t my_i2c_dev_num;
 static struct cdev my_i2c_cdev;
 static struct class *my_i2c_class;
 
-// file_operations 구조체
-// static const struct file_operations my_i2c_fops = {
 
-// };
+
+static int my_i2c_open(struct inode *inode, struct file *file)
+{
+    pr_info("device opened\n");
+    return 0;
+}
+
+static int my_i2c_release(struct inode *inode, struct file *file)
+{
+    pr_info("device closed\n");
+    return 0;
+}
+
+static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+    pr_info("read called\n");
+
+
+    return 0;
+}
+
+static ssize_t my_i2c_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+    pr_info("write called\n");
+
+    uint8_t kbuf[MAX_BUF_SIZE]; // stack mem
+
+    // max 길이 초과
+    if (count > MAX_BUF_SIZE) {
+        pr_err("Failed to copy data size\n");
+        return -EINVAL;
+    }
+    
+    // user space data(buf)를 kernel spcae data(kbuf)로 복사
+    if (copy_from_user(kbuf, buf, count)) {
+        pr_err("Failed to copy data from user\n");
+        return -EFAULT;
+    }
+
+    pr_info("I2C data: ");
+    for (int i = 0; i < count; ++i) {
+        pr_cont("%02X ", kbuf[i]);          // 16진수(2) 한 줄로 이어서 출력
+
+        // my_i2c_start();                        
+        // my_i2c_write_byte(kbuf[i]);            
+        // my_i2c_stop();                         
+    }
+    pr_cont("\n");
+
+    return count;
+}
+
+// file_operations 구조체
+static const struct file_operations my_i2c_fops = {
+    .owner = THIS_MODULE,
+    .open = my_i2c_open,
+    .release = my_i2c_release,
+    .read = my_i2c_read,
+    .write = my_i2c_write,
+};
 
 // myi2c module init
 static int __init my_i2c_init(void)
@@ -80,7 +141,7 @@ static int __init my_i2c_init(void)
 
     // 디바이스의 클래스를 sysfs에 등록 sys/class... (관리 목적)
     // 디바이스가 어떤 그룹에 속하는가
-    my_i2c_class = class_create(THIS_MODULE, "my_gpio_i2c_class");
+    my_i2c_class = class_create("my_gpio_i2c_class");
     if (IS_ERR(my_i2c_class)) {
         pr_err("Failed to create device class\n");
         ret = PTR_ERR(my_i2c_class);
