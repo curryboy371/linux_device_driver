@@ -12,6 +12,8 @@
 
 #include <linux/kernel.h> // pr log
 
+#include <linux/mutex.h>
+
 #include "my_i2c.h"
 
 
@@ -21,11 +23,15 @@
 
 */
 
-// atomic 처리 필요한가?
-// mutable은? 
-static int my_i2c_bussy = 0;
+
+// mutex 로 동시 접근 처리
+// mutex 처리는 추후
+static DEFINE_MUTEX(my_i2c_lock);
 
 static i2c_state_t my_i2c_state = I2C_STATE_IDLE;
+
+// TODO 하나의 slave 주소만 지원되어 추후 수정 필요
+uint8_t g_slave_addr = 0x00; // 슬레이브 주소 초기값
 
 static dev_t my_i2c_dev_num;
 static struct cdev my_i2c_cdev;
@@ -38,7 +44,6 @@ i2c_error_t my_i2c_start(void) {
 	// scl이 high 상태일 때 sda 라인이 high to low로 전환
 	// 초기상태 scl high
     
-	my_i2c_bussy = 1;
 
 	// SDA OUTPUT + LOW
 	ret = gpio_direction_output(I2C_SDA_GPIO, LOW);
@@ -66,20 +71,26 @@ i2c_error_t my_i2c_stop(void) {
 
 	// scl이 high 일 때 sda 라인이 low에서 high로 전환
 
+    // SDA stop condition output + LOW (SDA HIGH 보장을 위함)
+    if (gpio_direction_output(I2C_SDA_GPIO, LOW) < 0) {
+        pr_err("Failed to set SDA LOW for stop condition\n");
+        return I2C_ERR_UNKNOWN;
+    }
+
+
 	// stop setup time 4.0 us
     // scl high hold time 4.0 us
 	gpio_set_value(I2C_SCL_GPIO, HIGH);
 	udelay(4.0);
 
-
-	gpio_direction_output(I2C_SDA_GPIO, HIGH);
+    // SDA HIGH stop condition
+    gpio_set_value(I2C_SDA_GPIO, HIGH);
 
 
 	// bus free time( sda high hold time 대체)
 	// restart condition 4.7us
 	udelay(4.7);
 	
-	my_i2c_bussy = 0;
 
     return I2C_ERR_NONE;
 
@@ -124,6 +135,7 @@ i2c_error_t my_i2c_write_byte(uint8_t data) {
 }
 
 i2c_error_t my_i2c_read_byte(uint8_t *byte, int send_ack) {
+
 
     i2c_error_t ret = I2C_ERR_NONE;
     int data = 0;
@@ -187,7 +199,7 @@ i2c_error_t my_i2c_ack(void) {
 
     // ACK 수신 대기
     for(int i = 0; i < I2C_ACK_TIMEOUT_US; ++i) {
-        if(gpio_get_value(I2C_SDA_GPIO) == LOW) {
+        if(gpio_get_value(I2C_SDA_GPIO) == I2C_ACK) {
             ack_received = 1; // ACK 수신
             break;
         }
@@ -246,6 +258,12 @@ static int my_i2c_release(struct inode *inode, struct file *file) {
 static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
     pr_info("read called\n");
 
+
+    if(g_slave_addr == 0x00) {
+        pr_err("Slave address not set\n");
+        return -EINVAL; // 잘못된 파라미터
+    }
+
     uint8_t kbuf[MAX_BUF_SIZE]; // stack mem
 
     if( count > MAX_BUF_SIZE) {
@@ -262,20 +280,28 @@ static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, lo
             return -EIO; // I/O error
         }
 
-        // TODO 임시 주소
         // 슬레이브 주소 + READ 비트 전송
-        if(my_i2c_write_byte(0x50 | 1) != I2C_ERR_NONE) { 
+        if(my_i2c_write_byte(g_slave_addr | 1) != I2C_ERR_NONE) { 
+            my_i2c_stop();
             return -EIO; // I/O error
         }
 
         // ACK/NACK 확인 - Salve Addr Write에 대한 Slave Ack
         if(my_i2c_ack() != I2C_ERR_NONE) {
+            my_i2c_stop();
             return -EIO; // I/O error
         }
 
-        my_i2c_read_byte(&kbuf[cur_byte], (i < count - 1)); // 마지막 바이트는 NACK
+        if(my_i2c_read_byte(&kbuf[cur_byte], (i < count - 1))) { // 마지막 바이트는 NACK 
+            my_i2c_stop();
+            return -EIO;
+        }
 
-        kbuf[cur_byte++] = 0;
+        if(my_i2c_stop() != I2C_ERR_NONE) {
+            return -EIO;
+        }
+
+        ++cur_byte;
     }
 
     return count;
@@ -283,6 +309,7 @@ static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, lo
 
 static ssize_t my_i2c_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos) {
     pr_info("write called\n");
+
 
     uint8_t kbuf[MAX_BUF_SIZE]; // stack mem
 
@@ -298,30 +325,54 @@ static ssize_t my_i2c_write(struct file *file, const char __user *buf, size_t co
         return -EFAULT;
     }
 
+    if(my_i2c_start() != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
     pr_info("I2C data: ");
     for (int i = 0; i < count; ++i) {
         pr_cont("%02X ", kbuf[i]);          // 16진수(2) 한 줄로 이어서 출력
 
-        if(my_i2c_start() != I2C_ERR_NONE) {
-            return -EIO; // I/O error
-        }
-
         if(my_i2c_write_byte(kbuf[i]) != I2C_ERR_NONE) {
-            return -EIO; // I/O error
+            my_i2c_stop();
+            return -EIO;
         }
 
         if(my_i2c_ack() != I2C_ERR_NONE) {
-            return -EIO; // I/O error
+            my_i2c_stop();
+            return -EIO;
         }
 
-        if(my_i2c_stop() != I2C_ERR_NONE) {
-            return -EIO; // I/O error
-        }
     }
     pr_cont("\n");
+    
+    if(my_i2c_stop() != I2C_ERR_NONE) {
+        return -EIO;
+    }
 
     return count;
 }
+
+// ioctl 명령어 처리
+static long my_i2c_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    pr_info("ioctl called with cmd: %u, arg: %lu\n", cmd, arg);
+
+    switch ((i2c_cmd_t)cmd) {
+        case I2C_CMD_SET_SLAVE_ADDR:
+            if (copy_from_user(&g_slave_addr, (uint8_t __user *)arg, sizeof(uint8_t)))
+                return -EFAULT;
+            pr_info("Slave addr set: 0x%02x\n", g_slave_addr);
+            break;
+
+        default:
+            return -EINVAL;
+    }
+
+    return 0;
+}
+
+
 
 // file_operations 구조체
 static const struct file_operations my_i2c_fops = {
@@ -330,6 +381,7 @@ static const struct file_operations my_i2c_fops = {
     .release = my_i2c_release,
     .read = my_i2c_read,
     .write = my_i2c_write,
+    .unlocked_ioctl = my_i2c_ioctl,
 };
 
 // myi2c module init
@@ -408,6 +460,7 @@ static int __init my_i2c_init(void) {
     }
 
 
+    g_slave_addr = 0x00;
     my_i2c_state = I2C_STATE_IDLE;
 
     pr_info("driver loaded successfully (Major: %d, Minor: %d)\n", MAJOR(my_i2c_dev_num), MINOR(my_i2c_dev_num));
