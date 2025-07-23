@@ -30,12 +30,17 @@ static DEFINE_MUTEX(my_i2c_lock);
 
 static i2c_state_t my_i2c_state = I2C_STATE_IDLE;
 
-// TODO 하나의 slave 주소만 지원되어 추후 수정 필요
-uint8_t g_slave_addr = 0x00; // 슬레이브 주소 초기값
 
 static dev_t my_i2c_dev_num;
 static struct cdev my_i2c_cdev;
 static struct class *my_i2c_class;
+
+// file private data
+typedef struct my_i2c_session {
+    uint8_t slave_addr;
+
+} my_i2c_session_t;
+
 
 // i2c start condition
 i2c_error_t my_i2c_start(void) {
@@ -246,22 +251,43 @@ i2c_error_t my_i2c_master_ack(int ack) {
 static int my_i2c_open(struct inode *inode, struct file *file) {
     pr_info("device opened\n");
 
+    sess = kmalloc(sizeof(*sess), GFP_KERNEL);
+    if (!sess) {
+        return -ENOMEM;
+    }
+
+    sess->slave_addr = 0x00;     // 기본값
+    file->private_data = sess;
 
     return 0;
 }
 
 static int my_i2c_release(struct inode *inode, struct file *file) {
     pr_info("device closed\n");
+
+    struct my_i2c_session *sess = file->private_data;
+    
+    if (sess) {
+        kfree(sess);
+    }
+
+
     return 0;
 }
 
 static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
     pr_info("read called\n");
 
+    struct my_i2c_session *sess = file->private_data;
+    if(sess == NULL) {
+        pr_err("Session not initialized\n");
+        return -EINVAL;
+    }
 
-    if(g_slave_addr == 0x00) {
+
+    if(sess->slave_addr == 0x00) {
         pr_err("Slave address not set\n");
-        return -EINVAL; // 잘못된 파라미터
+        return -EINVAL;
     }
 
     uint8_t kbuf[MAX_BUF_SIZE]; // stack mem
@@ -274,34 +300,36 @@ static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, lo
 
     int cur_byte = 0;
 
-    for(int i = 0; i < count; ++i) {
+    if(my_i2c_start() != I2C_ERR_NONE) {
+        return -EIO; // I/O error
+    }
 
-        if(my_i2c_start() != I2C_ERR_NONE) {
-            return -EIO; // I/O error
-        }
+    // write address + read bit
+    if(my_i2c_write_byte((sess->slave_addr << 1) | 1) != I2C_ERR_NONE) {
+        my_i2c_stop();
+        return -EIO;
+    }
 
-        // 슬레이브 주소 + READ 비트 전송
-        if(my_i2c_write_byte(g_slave_addr | 1) != I2C_ERR_NONE) { 
-            my_i2c_stop();
-            return -EIO; // I/O error
-        }
+    // ACK check
+    if(my_i2c_ack() != I2C_ERR_NONE) {
+        my_i2c_stop();
+        return -EIO; // I/O error
+    }
 
-        // ACK/NACK 확인 - Salve Addr Write에 대한 Slave Ack
-        if(my_i2c_ack() != I2C_ERR_NONE) {
-            my_i2c_stop();
-            return -EIO; // I/O error
-        }
-
-        if(my_i2c_read_byte(&kbuf[cur_byte], (i < count - 1))) { // 마지막 바이트는 NACK 
+    for (int i = 0; i < count; ++i) {
+        int is_not_last = (i < count - 1);
+        if (my_i2c_read_byte(&kbuf[i], is_not_last) != I2C_ERR_NONE) {
             my_i2c_stop();
             return -EIO;
         }
+    }
 
-        if(my_i2c_stop() != I2C_ERR_NONE) {
-            return -EIO;
-        }
+    if(my_i2c_stop() != I2C_ERR_NONE) {
+        return -EIO;
+    }
 
-        ++cur_byte;
+    if (copy_to_user(buf, kbuf, count)) {
+        return -EFAULT;
     }
 
     return count;
@@ -353,27 +381,6 @@ static ssize_t my_i2c_write(struct file *file, const char __user *buf, size_t co
     return count;
 }
 
-// ioctl 명령어 처리
-static long my_i2c_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-    pr_info("ioctl called with cmd: %u, arg: %lu\n", cmd, arg);
-
-    switch ((i2c_cmd_t)cmd) {
-        case I2C_CMD_SET_SLAVE_ADDR:
-            if (copy_from_user(&g_slave_addr, (uint8_t __user *)arg, sizeof(uint8_t)))
-                return -EFAULT;
-            pr_info("Slave addr set: 0x%02x\n", g_slave_addr);
-            break;
-
-        default:
-            return -EINVAL;
-    }
-
-    return 0;
-}
-
-
-
 // file_operations 구조체
 static const struct file_operations my_i2c_fops = {
     .owner = THIS_MODULE,
@@ -381,7 +388,6 @@ static const struct file_operations my_i2c_fops = {
     .release = my_i2c_release,
     .read = my_i2c_read,
     .write = my_i2c_write,
-    .unlocked_ioctl = my_i2c_ioctl,
 };
 
 // myi2c module init
@@ -436,7 +442,7 @@ static int __init my_i2c_init(void) {
 
     // 디바이스의 클래스를 sysfs에 등록 sys/class... (관리 목적)
     // 디바이스가 어떤 그룹에 속하는가
-    my_i2c_class = class_create("my_gpio_i2c_class");
+    my_i2c_class = class_create("my_i2c_class");
     if (IS_ERR(my_i2c_class)) {
         pr_err("Failed to create device class\n");
         ret = PTR_ERR(my_i2c_class);
@@ -448,7 +454,7 @@ static int __init my_i2c_init(void) {
     }
 
     // device file 생성 ( /dev...)
-    if (device_create(my_i2c_class, NULL, my_i2c_dev_num, NULL, "my_gpio_i2c_dev") == NULL) {
+    if (device_create(my_i2c_class, NULL, my_i2c_dev_num, NULL, "my_i2c_dev") == NULL) {
         pr_err("Failed to create device file\n");
         ret = -ENOMEM;
         class_destroy(my_i2c_class); // 클래스 삭제
