@@ -23,6 +23,9 @@
 
 */
 
+#define DEVICE_NAME "my_i2c"
+
+
 
 // mutex 로 동시 접근 처리
 // mutex 처리는 추후
@@ -35,11 +38,6 @@ static dev_t my_i2c_dev_num;
 static struct cdev my_i2c_cdev;
 static struct class *my_i2c_class;
 
-// file private data
-typedef struct my_i2c_session {
-    uint8_t slave_addr;
-
-} my_i2c_session_t;
 
 
 // i2c start condition
@@ -251,26 +249,11 @@ i2c_error_t my_i2c_master_ack(int ack) {
 static int my_i2c_open(struct inode *inode, struct file *file) {
     pr_info("device opened\n");
 
-    sess = kmalloc(sizeof(*sess), GFP_KERNEL);
-    if (!sess) {
-        return -ENOMEM;
-    }
-
-    sess->slave_addr = 0x00;     // 기본값
-    file->private_data = sess;
-
     return 0;
 }
 
 static int my_i2c_release(struct inode *inode, struct file *file) {
     pr_info("device closed\n");
-
-    struct my_i2c_session *sess = file->private_data;
-    
-    if (sess) {
-        kfree(sess);
-    }
-
 
     return 0;
 }
@@ -296,9 +279,6 @@ static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, lo
         pr_err("Failed to copy data size\n");
         return -EINVAL;
     }
-
-
-    int cur_byte = 0;
 
     if(my_i2c_start() != I2C_ERR_NONE) {
         return -EIO; // I/O error
@@ -465,8 +445,6 @@ static int __init my_i2c_init(void) {
         return ret;
     }
 
-
-    g_slave_addr = 0x00;
     my_i2c_state = I2C_STATE_IDLE;
 
     pr_info("driver loaded successfully (Major: %d, Minor: %d)\n", MAJOR(my_i2c_dev_num), MINOR(my_i2c_dev_num));

@@ -13,6 +13,7 @@
 
 
 #include "my_i2c.h"
+#include "my_i2c_sample.h"
 
 
 /*
@@ -24,38 +25,89 @@
 
 #define DEVICE_NAME "my_i2c_sample"
 
-// 전역 pointer로 private data 관리
-static struct my_i2c_session *my_i2c_session = NULL;
-
 
 static dev_t my_i2c_sample_dev_num;
 static struct cdev my_i2c_sample_cdev;
 static struct class* my_i2c_sample_class;
 
 // read
+static ssize_t my_i2c_sample_read(struct file* file, char __user* buf, size_t count, loff_t* ppos) {
+    struct my_i2c_session* sess = file->private_data;
+
+    if (!sess) {
+        pr_err("Session is NULL\n");
+        return -EINVAL;
+    }
+
+    return 1;
+}
 
 // write
 
 
 // open
 static int my_i2c_sample_open(struct inode *inode, struct file *file) {
-    file->private_data = my_i2c_session;  // 고정된 하나의 세션 사용
+
+    struct my_i2c_session *sess;
+
+    sess = kmalloc(sizeof(*sess), GFP_KERNEL);
+    if (!sess) {
+        return -ENOMEM;
+    }
+
+    sess->slave_addr = SAMPLE_ADDR;
+    file->private_data = sess;
     return 0;
+
 }
 
+static ssize_t my_i2c_sample_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+    struct my_i2c_session *sess = file->private_data;
+    uint8_t kbuf[MAX_BUF_SIZE];
+    size_t bytes_written = 0;
+
+    if (!sess) {
+        pr_err("Session is NULL\n");
+        return -EINVAL;
+    }
+
+    if (count > MAX_BUF_SIZE) {
+        pr_err("Write size too big\n");
+        return -EINVAL;
+    }
+
+    if (copy_from_user(kbuf, buf, count)) {
+        pr_err("Failed to copy data from user\n");
+        return -EFAULT;
+    }
+
+
+    return bytes_written;
+}
+
+// release
+static int my_i2c_sample_release(struct inode *inode, struct file *file) {
+    struct my_i2c_session *sess = file->private_data;
+    
+    if(sess) {
+        kfree(sess);
+    }
+
+    return 0;
+}
 
 // file_operations 구조체
 static const struct file_operations my_i2c_sample_fops = {
     .owner = THIS_MODULE,
     .open = my_i2c_sample_open,
-    // .release = my_i2c_release,
-    // .read = my_i2c_read,
-    // .write = my_i2c_write,
-    // .unlocked_ioctl = my_i2c_ioctl,
+    .release = my_i2c_sample_release,
+    .read = my_i2c_sample_read,
+    .write = my_i2c_sample_write,
 };
 
 // init
-int my_sample_i2c_init(struct file* file) {
+static int __init my_sample_i2c_init(void) {
 
     int ret = 0;
 
@@ -101,17 +153,6 @@ int my_sample_i2c_init(struct file* file) {
         return ret;
     }
 
-    // private data 할당
-    my_i2c_session= kmalloc(sizeof(struct my_i2c_session), GFP_KERNEL);
-    if (!my_i2c_session) {
-        pr_err("Failed to allocate memory for my_i2c_session\n");
-        class_destroy(my_i2c_sample_class); // 클래스 삭제
-        cdev_del(&my_i2c_sample_cdev);
-        unregister_chrdev_region(my_i2c_sample_dev_num, 1);
-        return -ENOMEM;
-    }
-
-    my_i2c_session->slave_addr = SAMPLE_ADDR;
 
 
     pr_info("driver loaded successfully (Major: %d, Minor: %d)\n", MAJOR(my_i2c_sample_dev_num), MINOR(my_i2c_sample_dev_num));
@@ -119,9 +160,8 @@ int my_sample_i2c_init(struct file* file) {
 
 }
 
-
 // exit
-int my_sample_i2c_exit(struct file* file) {
+static void __exit my_sample_i2c_exit(void) {
 
     pr_info("driver exit...\n");
 
@@ -136,12 +176,6 @@ int my_sample_i2c_exit(struct file* file) {
 
     // 디바이스 번호 해제
     unregister_chrdev_region(my_i2c_sample_dev_num, 1);
-
-    // 세션 메모리 해제
-    if (my_i2c_session) {
-        kfree(my_i2c_session);
-        my_i2c_session = NULL;
-    }
 
     pr_info("driver exit successfully\n");
 }

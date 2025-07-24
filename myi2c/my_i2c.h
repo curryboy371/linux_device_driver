@@ -4,7 +4,6 @@
 #include <linux/types.h>
 
 
-#define DEVICE_NAME "my_i2c"
 
 
 
@@ -71,6 +70,13 @@ typedef enum {
     I2C_CMD_RESET_BUS,           // 버스 상태 초기화용 (optional)
 
 } i2c_cmd_t;
+
+// file private data
+typedef struct my_i2c_session {
+    uint8_t slave_addr;
+
+} my_i2c_session_t;
+
 
 
 i2c_error_t my_i2c_master_ack(int ack);
