@@ -20,7 +20,7 @@
 
 #define LED_COUNT 8 
 static const int gpio_led[LED_COUNT] = {
-    4, 5, 6, 7, // led0 ~ led3: count (LSB ~ MSB)
+    19, 26, 16, 20, // led 0,1,2,3 
     8,          // led4: unused or reserved
     9,          // led5: toggle 표시
     10,         // led6: CCW
@@ -53,19 +53,19 @@ static int led_fn(void *data) {
         // led3~led0 : count 값 (0~15)
         led |= (count & 0x0F);
 
-        // led5: toggle 상태
-        if (toggle)
+        // led5 toggle
+		if (toggle) {
             led |= (1 << 5);
+		}
 
-        // led6/7: 회전 방향 표시
-        static int last_count = -1;
-        if (last_count >= 0) {
-            if (count > last_count)
-                led |= (1 << 7); // CW
-            else if (count < last_count)
-                led |= (1 << 6); // CCW
-        }
-        last_count = count;
+        // led6/7: cw ccw
+		int direction = rotary_get_direction();
+		if(direction == 1) {
+           led |= (1 << 7); // CW
+		}
+		else if(direction == -1) {
+           led |= (1 << 6); // CCW
+		}
 
         led_write(led);
         msleep(50);

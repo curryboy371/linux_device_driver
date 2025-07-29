@@ -3,6 +3,7 @@
 
 int rotary_get_count(void);
 int rotary_get_toggle(void);
+int rotary_get_direction(void);
 
 int rotary_init(void);
 void rotary_exit(void);

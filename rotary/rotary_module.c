@@ -31,6 +31,23 @@
 #define COUNT_MIN 0
 #define COUNT_MAX 15 
 
+#define DEBOUNCE_HIST 3
+
+static int s1_hist[DEBOUNCE_HIST] = {0};
+static int s2_hist[DEBOUNCE_HIST] = {0};
+static int key_hist[DEBOUNCE_HIST] = {0};
+
+// -1: CCW, 1: CW, 0: Invalid or no move
+// index = prev << 2 | curr
+static const int8_t rotary_table[16] = {
+    0,  -1,   1,   0,
+    1,   0,   0,  -1,
+   -1,   0,   0,   1,
+    0,   1,  -1,   0
+};
+
+
+
 static struct task_struct *rotary_thread;
 static volatile unsigned int *gpio;
 static int last_state = 0;
@@ -38,7 +55,7 @@ static int last_state = 0;
 static int count = 0;
 static int key_prev = 0;
 static int toggle_state = 0;
-
+static int direction = 0;
 
 int rotary_get_count(void) {
     return count;
@@ -51,65 +68,141 @@ int rotary_get_toggle(void) {
 }
 EXPORT_SYMBOL(rotary_get_toggle);
 
+int rotary_get_direction(void) {
+	return direction;
+}
+EXPORT_SYMBOL(rotary_get_direction);
 
-static void update_key_toggle(void) {
-    int now = (GPIO_READ(GPIO_KEY)) ? 1 : 0;
+static inline int is_stable(int* hist) {
 
-    if (key_prev == 0 && now == 1) {
-        toggle_state ^= 1;
-
-		if(toggle_state) {
-			pr_info("toggle state 1\n");
-
-		}
-		else {
-			pr_info("toggle state 0\n");
-		}
-    }
-
-    key_prev = now;
+	// hist 0,1,2가 동일하면 안정되었다고 판단
+	return (hist[0] == hist[1]) && (hist[1] == hist[2]);
 }
 
-// polling thread
-static int rotary_fn(void *data) {
-    int s1, s2, state;
+static inline void shift_in(int* hist, int val) {
+
+	hist[0] = hist[1];
+	hist[1] = hist[2];
+	hist[2] = val;
+}
+
+static inline int get_rotary_state(void) {
+
+	int s1 = GPIO_READ(GPIO_S1) ? 1 : 0;
+	int s2 = GPIO_READ(GPIO_S2) ? 1 : 0;
+
+	// {s1, s2}
+	return (s1 << 1 | s2);
+}
+
+
+static int rotary_fn(void* data) {
+
+	int prev_state = get_rotary_state();
+	int key_prev = 0;
 
     while (!kthread_should_stop()) {
-        s1 = (GPIO_READ(GPIO_S1)) ? 1 : 0;
-        s2 = (GPIO_READ(GPIO_S2)) ? 1 : 0;
-        state = (s1 << 1) | s2;
 
-        if ((last_state == 0b00 && state == 0b01) ||
-            (last_state == 0b01 && state == 0b11) ||
-            (last_state == 0b11 && state == 0b10) ||
-            (last_state == 0b10 && state == 0b00)) {
-			if (count < COUNT_MAX) {
+		msleep(2);
+
+		// history shift
+		shift_in(s1_hist, GPIO_READ(GPIO_S1) ? 1 : 0);
+		shift_in(s2_hist, GPIO_READ(GPIO_S2) ? 1 : 0);
+		shift_in(key_hist, GPIO_READ(GPIO_KEY) ? 1 : 0);
+
+		if(is_stable(s1_hist) && is_stable(s2_hist)) {
+
+			int cur_state = (s1_hist[2] << 1) | s2_hist[2];
+			int index = (prev_state << 2) | cur_state;
+			int dir = rotary_table[index];
+
+			if(dir == 1 && count < COUNT_MAX) {
 				count++;
-				pr_info("CW → count: %d\n", count);
+				direction = 1;
+				pr_info("CS : count %d\n", count);
+			}
+			else if(dir == -1 && count > COUNT_MIN) {
+				count--;
+				direction = -1;
+				pr_info("CCW : count: %d\n", count);
 			}
 
-        } else if ((last_state == 0b00 && state == 0b10) ||
-                   (last_state == 0b10 && state == 0b11) ||
-                   (last_state == 0b11 && state == 0b01) ||
-                   (last_state == 0b01 && state == 0b00)) {
-			if (count > COUNT_MIN) {
-				count--;
-				pr_info("CCW → count: %d\n", count);
+			if(dir != 0) {
+				prev_state = cur_state;
 			}
+		}
+
+		// KEY 디바운스 처리
+		if (is_stable(key_hist)) {
+		int key_now = key_hist[2];
+			if (key_prev == 0 && key_now == 1) {
+				toggle_state ^= 1;
+				pr_info("toggle state: %d\n", toggle_state);
+			}
+			key_prev = key_now;
+		}
+	}
+
+	return 0;
+}
+
+
+static int rotary_fn_backup(void *data) {
+    int s1, s2, key;
+    int debounce_s1, debounce_s2, debounce_key;
+    int state;
+
+    while (!kthread_should_stop()) {
+        s1 = GPIO_READ(GPIO_S1) ? 1 : 0;
+        s2 = GPIO_READ(GPIO_S2) ? 1 : 0;
+        key = GPIO_READ(GPIO_KEY) ? 1 : 0;
+
+        msleep(5);  // 디바운스 지연
+
+        debounce_s1 = GPIO_READ(GPIO_S1) ? 1 : 0;
+        debounce_s2 = GPIO_READ(GPIO_S2) ? 1 : 0;
+        debounce_key = GPIO_READ(GPIO_KEY) ? 1 : 0;
+
+        if (s1 == debounce_s1 && s2 == debounce_s2) {
+            state = (debounce_s1 << 1) | debounce_s2;
+
+            if ((last_state == 0b00 && state == 0b01) ||
+                (last_state == 0b01 && state == 0b11) ||
+                (last_state == 0b11 && state == 0b10) ||
+                (last_state == 0b10 && state == 0b00)) {
+
+                if (count < COUNT_MAX) {
+                    count++;
+                    pr_info("CW → count: %d\n", count);
+					direction = 1;
+                }
+
+            } else if ((last_state == 0b00 && state == 0b10) ||
+                       (last_state == 0b10 && state == 0b11) ||
+                       (last_state == 0b11 && state == 0b01) ||
+                       (last_state == 0b01 && state == 0b00)) {
+
+                if (count > COUNT_MIN) {
+                    count--;
+                    pr_info("CCW → count: %d\n", count);
+					direction = -1;
+                }
+            }
+
+            last_state = state;
         }
 
-        last_state = state;
-
-		// 키 버튼 상태 업데이트
-		update_key_toggle();
-
-		// debounce 10ms
-        msleep(10);
+        if (key == debounce_key) {
+            if (key_prev == 0 && key == 1) {  // rising edge
+                toggle_state ^= 1;
+                pr_info("toggle state: %d\n", toggle_state);
+            }
+            key_prev = key;
+        }
     }
 
     return 0;
 }
-
 
 // static struct input_dev* rotary_input_dev;
 // static int irq_s1, irq_s2;
