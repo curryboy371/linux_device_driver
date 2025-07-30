@@ -1,26 +1,25 @@
-obj-m := ledbar_rotary_module.o
-ledbar_rotary_module-objs := ledbar_module.o ../rotary/rotary_module.o
-
-# make 일반 컴파일
-# make CROSS=1 크로스 컴파일
+obj-m := ledbar_module.o
 
 KDIR := $(HOME)/project/linux
 PWD  := $(shell pwd)
 
-# 기본값: x86_64
 ARCH ?= x86_64
 CROSS_COMPILE ?=
-
 ifeq ($(CROSS),1)
     ARCH := arm64
     CROSS_COMPILE := aarch64-linux-gnu-
 endif
 
-# 헤더 파일 경로
-ccflags-y += -I$(src)/../rotary
+# 헤더 경로
+ccflags-y += -I$(PWD)/../rotary
+
+# rotary 심볼을 찾기 위해 Module.symvers 참조
+#KBUILD_EXTRA_SYMBOLS := $(shell pwd)/../rotary/Module.symvers
+KBUILD_EXTRA_SYMBOLS := /home/pi/linux_device_driver/rotary/Module.symvers
+
 
 all:
-	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules -j12
+	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 
 clean:
 	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean

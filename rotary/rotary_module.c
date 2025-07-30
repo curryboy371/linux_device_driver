@@ -1,400 +1,470 @@
 #define pr_fmt(fmt) "[rotary] " fmt
-
+#include "rotary_module.h"
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/input.h> // input 사용
-
-#include <linux/gpio.h>
+#include <linux/input.h>
+#include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/delay.h>
+#include <linux/workqueue.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/of_gpio.h>
 
 #include <linux/kthread.h>
-#include <linux/delay.h>
-#include <linux/io.h>
-
-#include "rotary_module.h"
-
-
-#define GPIO_S1 17
-#define GPIO_S2 27
-#define GPIO_KEY 22
-
-// BCM2711 기준 주소
-#define BCM2711_PERI_BASE   0xFE000000
-#define GPIO_BASE           (BCM2711_PERI_BASE + 0x200000)
-
-// GPIO 관련 매크로
-#define GPIO_IN(g)   (*(gpio + ((g)/10)) &= ~(7 << (((g)%10)*3)))
-#define GPIO_READ(g) ((*(gpio + 13)) & (1 << (g)))
-
 
 #define COUNT_MIN 0
-#define COUNT_MAX 15 
+#define COUNT_MAX 15
+#define DEBOUNCE_DELAY_MS 1 // rotary 디바운스 지연 시간 (밀리초)
+#define KEY_DEBOUNCE_DELAY_MS 20 // key 디바운스 지연 시간 (밀리초)
 
-#define DEBOUNCE_HIST 3
 
-static int s1_hist[DEBOUNCE_HIST] = {0};
-static int s2_hist[DEBOUNCE_HIST] = {0};
-static int key_hist[DEBOUNCE_HIST] = {0};
 
-// -1: CCW, 1: CW, 0: Invalid or no move
-// index = prev << 2 | curr
-static const int8_t rotary_table[16] = {
-    0,  -1,   1,   0,
-    1,   0,   0,  -1,
-   -1,   0,   0,   1,
-    0,   1,  -1,   0
+static unsigned long DEBOUNCE_JIFFIES;
+static unsigned long KEY_DEBOUNCE_JIFFIES;
+
+
+#define HISTORY_SIZE 4
+#define HISTORY_MASK 0xFF
+
+// 정석대로 하면 인식이 잘 안됨
+// 회전 로그를 찍어보고, 인식되는 패턴을 찾아 배열에 넣고 매칭시키는 방식을 사용
+static const uint8_t cw_patterns[] = {
+    0x1E, 0x78, 0xE1, 0x87
 };
 
+static const uint8_t ccw_patterns[] = {
+    0x4D, 0x34, 0xD3, 0x8D
+};
 
+// rotary driver 데이터 구조체
+struct rotary_data {
+    struct input_dev* input_dev;
+    struct gpio_desc *s1_gpio_desc;
+    struct gpio_desc *s2_gpio_desc;
+    struct gpio_desc *key_gpio_desc;
+    int irq_s1, irq_s2, irq_key;
+    struct delayed_work rotary_dw; // 로터리 엔코더 디바운싱용 delayed work
+    struct delayed_work key_dw;    // 버튼 디바운싱용 delayed work
+    struct task_struct *polling_thread; // 로터리 thread ( polling 방식으로 체크하기 위함)
+    uint8_t shift_reg;
+    //int last_rotary_state; // 이전 유효한 로터리 상태 (s1 << 1) | s2
+    int count;             // 현재 로터리 카운트
+    int toggle_state;      // 버튼 토글 상태
+    int direction;         // 마지막 회전 방향 (1: CW, -1: CCW, 0: 없음)
+};
 
-static struct task_struct *rotary_thread;
-static volatile unsigned int *gpio;
-static int last_state = 0;
+static struct rotary_data *g_rotary_data = NULL; // 전역 데이터 포인터
+static int rotary_ready = 0; // 드라이버 ready
 
-static int count = 0;
-static int key_prev = 0;
-static int toggle_state = 0;
-static int direction = 0;
-
+////// Export 함수
 int rotary_get_count(void) {
-    return count;
+    return (g_rotary_data && rotary_ready) ? g_rotary_data->count : 0;
 }
 EXPORT_SYMBOL(rotary_get_count);
 
-
 int rotary_get_toggle(void) {
-    return toggle_state;
+    return (g_rotary_data && rotary_ready) ? g_rotary_data->toggle_state : 0;
 }
 EXPORT_SYMBOL(rotary_get_toggle);
 
 int rotary_get_direction(void) {
-	return direction;
+    return (g_rotary_data && rotary_ready) ? g_rotary_data->direction : 0;
 }
 EXPORT_SYMBOL(rotary_get_direction);
 
-static inline int is_stable(int* hist) {
+int rotary_is_ready(void) {
+    return rotary_ready;
+}
+EXPORT_SYMBOL(rotary_is_ready);
 
-	// hist 0,1,2가 동일하면 안정되었다고 판단
-	return (hist[0] == hist[1]) && (hist[1] == hist[2]);
+
+static bool match_pattern(uint8_t value, const uint8_t *patterns, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+        if (value == patterns[i])
+            return true;
+    }
+    return false;
 }
 
-static inline void shift_in(int* hist, int val) {
+static int rotary_polling_fn(void *arg)
+{
+    struct rotary_data *data = arg;
 
-	hist[0] = hist[1];
-	hist[1] = hist[2];
-	hist[2] = val;
-}
-
-static inline int get_rotary_state(void) {
-
-	int s1 = GPIO_READ(GPIO_S1) ? 1 : 0;
-	int s2 = GPIO_READ(GPIO_S2) ? 1 : 0;
-
-	// {s1, s2}
-	return (s1 << 1 | s2);
-}
-
-
-static int rotary_fn(void* data) {
-
-	int prev_state = get_rotary_state();
-	int key_prev = 0;
+    int prev_s1 = -1;
+    int prev_s2 = -1;
 
     while (!kthread_should_stop()) {
+        int s1 = gpiod_get_value(data->s1_gpio_desc);
+        int s2 = gpiod_get_value(data->s2_gpio_desc);
 
-		msleep(2);
-
-		// history shift
-		shift_in(s1_hist, GPIO_READ(GPIO_S1) ? 1 : 0);
-		shift_in(s2_hist, GPIO_READ(GPIO_S2) ? 1 : 0);
-		shift_in(key_hist, GPIO_READ(GPIO_KEY) ? 1 : 0);
-
-		if(is_stable(s1_hist) && is_stable(s2_hist)) {
-
-			int cur_state = (s1_hist[2] << 1) | s2_hist[2];
-			int index = (prev_state << 2) | cur_state;
-			int dir = rotary_table[index];
-
-			if(dir == 1 && count < COUNT_MAX) {
-				count++;
-				direction = 1;
-				pr_info("CS : count %d\n", count);
-			}
-			else if(dir == -1 && count > COUNT_MIN) {
-				count--;
-				direction = -1;
-				pr_info("CCW : count: %d\n", count);
-			}
-
-			if(dir != 0) {
-				prev_state = cur_state;
-			}
-		}
-
-		// KEY 디바운스 처리
-		if (is_stable(key_hist)) {
-		int key_now = key_hist[2];
-			if (key_prev == 0 && key_now == 1) {
-				toggle_state ^= 1;
-				pr_info("toggle state: %d\n", toggle_state);
-			}
-			key_prev = key_now;
-		}
-	}
-
-	return 0;
-}
-
-
-static int rotary_fn_backup(void *data) {
-    int s1, s2, key;
-    int debounce_s1, debounce_s2, debounce_key;
-    int state;
-
-    while (!kthread_should_stop()) {
-        s1 = GPIO_READ(GPIO_S1) ? 1 : 0;
-        s2 = GPIO_READ(GPIO_S2) ? 1 : 0;
-        key = GPIO_READ(GPIO_KEY) ? 1 : 0;
-
-        msleep(5);  // 디바운스 지연
-
-        debounce_s1 = GPIO_READ(GPIO_S1) ? 1 : 0;
-        debounce_s2 = GPIO_READ(GPIO_S2) ? 1 : 0;
-        debounce_key = GPIO_READ(GPIO_KEY) ? 1 : 0;
-
-        if (s1 == debounce_s1 && s2 == debounce_s2) {
-            state = (debounce_s1 << 1) | debounce_s2;
-
-            if ((last_state == 0b00 && state == 0b01) ||
-                (last_state == 0b01 && state == 0b11) ||
-                (last_state == 0b11 && state == 0b10) ||
-                (last_state == 0b10 && state == 0b00)) {
-
-                if (count < COUNT_MAX) {
-                    count++;
-                    pr_info("CW → count: %d\n", count);
-					direction = 1;
-                }
-
-            } else if ((last_state == 0b00 && state == 0b10) ||
-                       (last_state == 0b10 && state == 0b11) ||
-                       (last_state == 0b11 && state == 0b01) ||
-                       (last_state == 0b01 && state == 0b00)) {
-
-                if (count > COUNT_MIN) {
-                    count--;
-                    pr_info("CCW → count: %d\n", count);
-					direction = -1;
-                }
-            }
-
-            last_state = state;
+        // 이전 상태와 같으면 처리 생략
+        if (s1 == prev_s1 && s2 == prev_s2) {
+            msleep(DEBOUNCE_DELAY_MS);
+            continue;
         }
 
-        if (key == debounce_key) {
-            if (key_prev == 0 && key == 1) {  // rising edge
-                toggle_state ^= 1;
-                pr_info("toggle state: %d\n", toggle_state);
+        prev_s1 = s1;
+        prev_s2 = s2;
+
+        int cur_state = (s2 << 1) | s1;
+
+        // shift_reg 갱신 (2bit씩 shift, 최신 샘플이 LSB)
+        data->shift_reg = ((data->shift_reg << 2) | cur_state);
+
+        uint8_t recent = data->shift_reg;
+
+        //pr_info("[rotary] s1=%d, s2=%d, shift_reg=0x%02X\n", s1, s2, data->shift_reg);
+
+        // 패턴 매칭
+        if (match_pattern(recent, cw_patterns, ARRAY_SIZE(cw_patterns))) {
+            if(data->count < COUNT_MAX) {
+                data->count++;
+                data->direction = 1;
+                pr_info("[rotary] CW detected, count = %d\n", data->count);
+                input_report_rel(data->input_dev, REL_DIAL, 1);
+                input_sync(data->input_dev);
             }
-            key_prev = key;
+
+        } else if (match_pattern(recent, ccw_patterns, ARRAY_SIZE(ccw_patterns))) {
+            if(data->count > COUNT_MIN) {
+                data->count--;
+                data->direction = -1;
+                pr_info("[rotary] CCW detected, count = %d\n", data->count);
+                input_report_rel(data->input_dev, REL_DIAL, -1);
+                input_sync(data->input_dev);
+            }
         }
+
+        msleep(DEBOUNCE_DELAY_MS);
     }
 
     return 0;
 }
 
-// static struct input_dev* rotary_input_dev;
-// static int irq_s1, irq_s2;
-// static int last_state = 0;
+// //// work function
+// 인터럽트 방식으로 dw 회전 로그 보니 중간단계가 생략되서 인식이 잘 안됨
+// static void rotary_work_func(struct work_struct *work) {
+//     struct rotary_data *data = container_of(work, struct rotary_data, rotary_dw.work);
 
+//     static uint8_t state_buf[STEP_BUF_LEN] = {0xFF, 0xFF, 0xFF, 0xFF};
+//     static int buf_index = 0;
 
-// static irqreturn_t rotary_isr(int irq, void* dev_id) {
+//     int s1 = gpiod_get_value(data->s1_gpio_desc);
+//     int s2 = gpiod_get_value(data->s2_gpio_desc);
+//     uint8_t current_state = (s1 << 1) | s2;
 
-// 	// pin 값 얻기
-// 	int s1 = gpio_get_value(GPIO_S1);
-// 	int s2 = gpio_get_value(GPIO_S2);
+//     pr_info("rotary irq: s1=%d, s2=%d, current_state=%d\n", s1, s2, current_state);
 
+//     // 상태 버퍼에 현재 상태 저장
+//     state_buf[buf_index] = current_state;
+//     buf_index = (buf_index + 1) % STEP_BUF_LEN;
 
+//     pr_info("state_buf: [%d %d %d %d] (buf_index=%d)\n",
+//         state_buf[0], state_buf[1], state_buf[2], state_buf[3], buf_index);
 
-// 	// debounce 제거 
+//     // 비교할 회전 시퀀스 정의
+//     const uint8_t cw_seq[STEP_BUF_LEN]  = {0b00, 0b01, 0b11, 0b10};
+//     const uint8_t ccw_seq[STEP_BUF_LEN] = {0b00, 0b10, 0b11, 0b01};
 
-//     int state = (s1 << 1) | s2;
-
-//     if ((last_state == 0b00 && state == 0b01) ||
-//         (last_state == 0b01 && state == 0b11) ||
-//         (last_state == 0b11 && state == 0b10) ||
-//         (last_state == 0b10 && state == 0b00)) {
-//         input_report_rel(rotary_input_dev, REL_DIAL, 1);  // CW
-//     } else if (
-//         (last_state == 0b00 && state == 0b10) ||
-//         (last_state == 0b10 && state == 0b11) ||
-//         (last_state == 0b11 && state == 0b01) ||
-//         (last_state == 0b01 && state == 0b00)) {
-//         input_report_rel(rotary_input_dev, REL_DIAL, -1); // CCW
+//     // 순환 비교
+//     bool match_cw = true, match_ccw = true;
+//     for (int i = 0; i < STEP_BUF_LEN; i++) {
+//         int idx = (buf_index + i) % STEP_BUF_LEN;
+//         if (state_buf[idx] != cw_seq[i]) match_cw = false;
+//         if (state_buf[idx] != ccw_seq[i]) match_ccw = false;
 //     }
 
-//     last_state = state;
-//     input_sync(rotary_input_dev);
-//     return IRQ_HANDLED;
+//     pr_info("match_cw=%d, match_ccw=%d\n", match_cw, match_ccw);
 
+//     if (match_cw && data->count < COUNT_MAX) {
+//         data->count++;
+//         data->direction = 1;
+//         pr_info("CW detected: count=%d\n", data->count);
+//         input_report_rel(data->input_dev, REL_DIAL, 1);
+//         input_sync(data->input_dev);
+//         memset(state_buf, 0xFF, STEP_BUF_LEN);
+//     }
+//     else if (match_ccw && data->count > COUNT_MIN) {
+//         data->count--;
+//         data->direction = -1;
+//         pr_info("CCW detected: count=%d\n", data->count);
+//         input_report_rel(data->input_dev, REL_DIAL, -1);
+//         input_sync(data->input_dev);
+//         memset(state_buf, 0xFF, STEP_BUF_LEN);
+//     } else {
+//         data->direction = 0;
+//     }
 // }
 
-int __init rotary_init(void) {
 
-	//int err = 0;
+// 이 방식은 디바운스 처리가 제대로 안돼
+// 로터리 엔코더 워크 함수: 디바운싱 후 실제 값 처리
+// static void rotary_work_func(struct work_struct *work) {
+//     struct rotary_data *data = container_of(work, struct rotary_data, rotary_dw.work);
+    
+//     int s1_1 = gpiod_get_value(data->s1_gpio_desc);
+//     int s2_1 = gpiod_get_value(data->s2_gpio_desc);
+//     // 짧게 한번 더 delay
+//      msleep(2);  
+//     int s1_2 = gpiod_get_value(data->s1_gpio_desc);
+//     int s2_2 = gpiod_get_value(data->s2_gpio_desc);
 
-	pr_info("rotary init \n");
+//     if (s1_1 != s1_2 || s2_1 != s2_2) {
+//         return;
+//     }
 
-	gpio = ioremap(GPIO_BASE, PAGE_SIZE);
-    if (!gpio) {
-        pr_err("ioremap failed\n");
+//     // {s1, s2}
+//     int current_state = (s1_2 << 1) | s2_2;
+//     int dir = rotary_table[(data->last_rotary_state << 2) | current_state];
+
+
+//     if (dir == 1 && data->count < COUNT_MAX) { // // 시계 방향 (CW)
+//         data->count++;
+//         data->direction = 1;
+//         pr_info("CW : count %d\n", data->count);
+//         input_report_rel(data->input_dev, REL_DIAL, 1);
+//     } else if (dir == -1 && data->count > COUNT_MIN) { // // 반시계 방향 (CCW)
+//         data->count--;
+//         data->direction = -1;
+//         pr_info("CCW : count %d\n", data->count);
+//         input_report_rel(data->input_dev, REL_DIAL, -1);
+//     } else {
+//         data->direction = 0;
+//     }
+
+//     // 유효한 방향 변화가 있을때만 last state 업데이트
+//     if (dir != 0) {
+//         data->last_rotary_state = current_state;
+//     }
+
+//     // input event 동기화
+//     input_sync(data->input_dev);
+// }
+
+// 버튼 워크 함수: 디바운싱 후 실제 값 처리
+static void key_work_func(struct work_struct *work) {
+    struct rotary_data *data = container_of(work, struct rotary_data, key_dw.work);
+    int key_value = gpiod_get_value(data->key_gpio_desc); 
+    
+    if (key_value == 1) {  // 버튼이 눌림
+        data->toggle_state ^= 1; // 토글 상태 반전
+        pr_info("toggle state: %d\n", data->toggle_state);
+
+    } else { // 버튼이 떼어졌을 때
+
+    }
+
+    // 키 눌림 이벤트 보고
+    input_report_key(data->input_dev, KEY_ENTER, key_value); 
+
+    // 입력 이벤트 동기화
+    input_sync(data->input_dev);
+
+}
+
+//// ISR 함수
+
+// 로터리 엔코더 IRQ 핸들러
+// static irqreturn_t rotary_isr(int irq, void* dev_id) {
+//     struct rotary_data *data = (struct rotary_data *)dev_id;
+
+//     // 이미 예약된 인터럽트가 있다면 취소 ( 중복 실행 방지 )
+//     cancel_delayed_work(&data->rotary_dw);
+    
+//     // DEBOUNCE_JIFFIES 후에 rotary_work_func enqueue
+//     schedule_delayed_work(&data->rotary_dw, DEBOUNCE_JIFFIES);
+    
+//     return IRQ_HANDLED;
+// }
+
+// 버튼 IRQ 핸들러
+static irqreturn_t key_isr(int irq, void* dev_id) {
+    struct rotary_data *data = (struct rotary_data *)dev_id;
+    
+    // 이미 예약된 인터럽트가 있다면 취소 ( 중복 실행 방지 )
+    cancel_delayed_work(&data->key_dw);
+
+    // KEY_DEBOUNCE_JIFFIES 후에 rotary_work_func enqueue
+    schedule_delayed_work(&data->key_dw, KEY_DEBOUNCE_JIFFIES);
+    
+    return IRQ_HANDLED;
+}
+
+/* --- 플랫폼 드라이버 등록 --- */
+
+static int rotary_probe(struct platform_device *pdev) {
+    struct device *dev = &pdev->dev;
+    struct rotary_data *data;
+    int err;
+    
+    pr_info("rotary_probe started\n");
+    
+    data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+    if (!data)
+        return -ENOMEM;
+        
+    // DEBOUNCE를 jiffies 단위로
+    // 리눅스 커널 내 타이머, 워크큐는 jiffies 단위로 동작함
+    DEBOUNCE_JIFFIES = msecs_to_jiffies(DEBOUNCE_DELAY_MS);
+    KEY_DEBOUNCE_JIFFIES = msecs_to_jiffies(KEY_DEBOUNCE_DELAY_MS);
+
+    // device tree gpio와 매칭
+    // devm은 리소스 자동 관리
+    data->s1_gpio_desc = devm_gpiod_get(dev, "rotary-s1", GPIOD_IN);
+    if (IS_ERR(data->s1_gpio_desc)) {
+        pr_err("Failed to get rotary-s1 GPIO: %ld\n", PTR_ERR(data->s1_gpio_desc));
+        return PTR_ERR(data->s1_gpio_desc);
+    }
+
+    data->s2_gpio_desc = devm_gpiod_get(dev, "rotary-s2", GPIOD_IN);
+    if (IS_ERR(data->s2_gpio_desc)) {
+        pr_err("Failed to get rotary-s2 GPIO: %ld\n", PTR_ERR(data->s2_gpio_desc));
+        return PTR_ERR(data->s2_gpio_desc);
+    }
+
+    data->key_gpio_desc = devm_gpiod_get(dev, "rotary-key", GPIOD_IN);
+    if (IS_ERR(data->key_gpio_desc)) {
+        pr_err("Failed to get rotary-key GPIO: %ld\n", PTR_ERR(data->key_gpio_desc));
+        return PTR_ERR(data->key_gpio_desc);
+    }
+
+    // 초기 상태 설정
+    data->count = 0;
+    data->toggle_state = 0;
+    data->direction = 0;
+
+    // input device 생성
+    data->input_dev = devm_input_allocate_device(dev);
+    if (!data->input_dev) {
+        pr_err("Failed to allocate input device\n");
         return -ENOMEM;
     }
 
-	// GPIO input 설정 (S1, S2)
-    GPIO_IN(GPIO_S1);
-    GPIO_IN(GPIO_S2);
+    data->input_dev->name = "Rotary Encoder with Button";
+    data->input_dev->phys = "rotary/input0";
+    data->input_dev->id.bustype = BUS_VIRTUAL;
+    data->input_dev->dev.parent = dev;
+    
+    input_set_capability(data->input_dev, EV_REL, REL_DIAL); // 로터리 엔코더 회전 (상대적 변화)
+    input_set_capability(data->input_dev, EV_KEY, KEY_ENTER); // 버튼 (Enter 키)
 
-	// 초기 상태 저장
-    last_state = ((GPIO_READ(GPIO_S1) ? 1 : 0) << 1) | (GPIO_READ(GPIO_S2) ? 1 : 0);
-
-
-	// polling thread 시작
-    rotary_thread = kthread_run(rotary_fn, NULL, "rotary_thread");
-    if (IS_ERR(rotary_thread)) {
-        pr_err("Failed to create thread\n");
-        iounmap(gpio);
-        return PTR_ERR(rotary_thread);
+    err = input_register_device(data->input_dev);
+    if (err) {
+        pr_err("Failed to register input device: %d\n", err);
+        return err;
     }
 
+    // Interrupt routine Queue
+    data->irq_s1 = gpiod_to_irq(data->s1_gpio_desc);
+    data->irq_s2 = gpiod_to_irq(data->s2_gpio_desc);
+    data->irq_key = gpiod_to_irq(data->key_gpio_desc);
 
-	// // GPIO 핀 유효성 검사
-    // if (!gpio_is_valid(GPIO_S1) || !gpio_is_valid(GPIO_S2)) {
-    //     pr_err("Invalid GPIO pins\n");
-    //     return -EINVAL;
+    pr_info("IRQ numbers: s1=%d, s2=%d, key=%d\n", data->irq_s1, data->irq_s2, data->irq_key);
+
+    if ((data->irq_s1 < 0) || (data->irq_s2 < 0) || (data->irq_key < 0)) {
+        pr_err("Invalid IRQ numbers\n");
+        return -EINVAL;
+    }
+
+    // S1 rising, falling 인터럽트 발생
+    // err = devm_request_irq(dev, data->irq_s1, rotary_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "rotary_s1_isr", data);
+    // if (err) {
+    //     pr_err("Failed to request IRQ for s1: %d\n", err);
+    //     return err;
     // }
-	
-	// // gpio 등록, input mode 설정
-	// err = gpio_request(GPIO_S1, "s1");
-	// if (err) {
-	// 	pr_err("Failed to request GPIO_S1: %d\n", err);
-	// 	return err;
-	// }
+    
+    // s2 rising, falling 인터럽트 발생
+    // err = devm_request_irq(dev, data->irq_s2, rotary_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "rotary_s2_isr", data);
+    // if (err) {
+    //     pr_err("Failed to request IRQ for s2: %d\n", err);
+    //     return err;
+    // }
+    
+    // key rising, falling 인터럽트 발생
+    err = devm_request_irq(dev, data->irq_key, key_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "rotary_key_isr", data);
+    if (err) {
+        pr_err("Failed to request IRQ for key: %d\n", err);
+        return err;
+    }
 
-	// err = gpio_direction_input(GPIO_S1);
-	// if (err) {
-	// 	pr_err("Failed to set GPIO_S1 as input: %d\n", err);
-	// 	gpio_free(GPIO_S1);
-	// 	return err;
-	// }
+    // work queue 초기화
+    // 커널에서 시간이 오래 걸리는 작업을 ISR에서 직접 수행하지 않고
+    // 미뤄두고 프로세스 컨텍스트에서 안전하게 수행하도록 함
+    //INIT_DELAYED_WORK(&data->rotary_dw, rotary_work_func);
+    INIT_DELAYED_WORK(&data->key_dw, key_work_func);
 
-	// // err = gpio_request_one(GPIO_S1, GPIOF_IN, "s1");
-	// // if (err) {
-	// //     pr_err("Failed to request GPIO_S1: %d\n", err);
-	// // 	return err;
-	// // }
+    // dw는 polling 방식으로 처리하기 위해 thread
+    // 모듈 초기화 시
+    data->polling_thread = kthread_run(rotary_polling_fn, data, "rotary_polling_thread");
+    if (IS_ERR(data->polling_thread)) {
+        pr_err("Failed to create polling thread\n");
+        return PTR_ERR(data->polling_thread);
+    }
+    
+    // 플랫폼 디바이스와 this driver간 data를 공유하도록 set
+    platform_set_drvdata(pdev, data);
+    g_rotary_data = data;
 
-	// irq_s1 = gpio_to_irq(GPIO_S1);
-	// if (irq_s1 < 0) {
-    // 	pr_err("gpio_to_irq s1 failed: %d\n", irq_s1);
-	//     gpio_free(GPIO_S1);
-    // 	return irq_s1;
-	// }
-
-	// err = gpio_request_one(GPIO_S2, GPIOF_IN, "s2");
-	// if (err) {
-	//     pr_err("Failed to request GPIO_S2: %d\n", err);
-    // 	gpio_free(GPIO_S1);
-	// 	return err;
-	// }
-
-	// irq_s2 = gpio_to_irq(GPIO_S2);
-	// if (irq_s2 < 0) {
-    // 	pr_err("gpio_to_irq s2 failed: %d\n", irq_s2);
-	//     gpio_free(GPIO_S1);
-	//     gpio_free(GPIO_S2);
-    // 	return irq_s2;
-	// }
-
-	// // input dev 구조체를 위한 메모리 할당
-	// rotary_input_dev = input_allocate_device();
-	// if(!rotary_input_dev) {
-	// 	pr_err("failed to allocate device\n");
-	//     gpio_free(GPIO_S1);
-	//     gpio_free(GPIO_S2);
-
-	// 	return -ENOMEM;
-	// }
-
-	// rotary_input_dev->name = "rotary-encoder";
-	// rotary_input_dev->phys = "rotary/input0";
-	// rotary_input_dev->id.bustype = BUS_HOST;
-
-	// // register device 보다 먼저 호출
-	// // REL_DIAL 이벤트 생성
-	// input_set_capability(rotary_input_dev, EV_REL, REL_DIAL);
-
-
-	// err = input_register_device(rotary_input_dev);
-	// if(err) {
-	// 	pr_err("failed to register device\n");
-	//     gpio_free(GPIO_S1);
-	//     gpio_free(GPIO_S2);
-	// 	input_free_device(rotary_input_dev);
-	// 	return err;
-	// }
-
-	// // riging, fall
-
-	// err = request_irq(irq_s1, rotary_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "rotary_s1", NULL);
-	// if (err) {
-	//     pr_err("Failed to request IRQ for S1: %d\n", err);
-	//     gpio_free(GPIO_S1);
-	//     gpio_free(GPIO_S2);
-		
-    // 	input_unregister_device(rotary_input_dev);
-    // 	return err;
-	// }
-
-	// err = request_irq(irq_s2, rotary_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "rotary_s2", NULL);
-	// if (err) {
-    // 	pr_err("Failed to request IRQ for S2: %d\n", err);
-	//     free_irq(irq_s1, NULL);
-
-	//     gpio_free(GPIO_S1);
-	//     gpio_free(GPIO_S2);
-
-    // 	input_unregister_device(rotary_input_dev);
-    // 	return err;
-	// }
-
+    // rotary ready ok
+    rotary_ready = 1;
+    pr_info("Rotary platform driver probed successfully\n");
+    
     return 0;
 }
 
-void __exit rotary_exit(void) {
-	pr_info("rotary exit \n");
+static void rotary_remove(struct platform_device *pdev) {
+    struct rotary_data *data = platform_get_drvdata(pdev);
+    
+    pr_info("rotary_remove\n");
+    
+    rotary_ready = 0;
+    
+    if (data) {
+        // 모듈 제거 시 진행 중인 모든 delayed work를 취소
+        //cancel_delayed_work_sync(&data->rotary_dw);
+        cancel_delayed_work_sync(&data->key_dw);
+        g_rotary_data = NULL;
 
-
-	if (rotary_thread) {
-        kthread_stop(rotary_thread);
-	}
-
-    if (gpio) {
-        iounmap(gpio);
-	}
-
-    // free_irq(irq_s1, NULL);
-    // free_irq(irq_s2, NULL);
-    // gpio_free(GPIO_S1);
-    // gpio_free(GPIO_S2);
-    // input_unregister_device(rotary_input_dev);
+        if (data->polling_thread) {
+            kthread_stop(data->polling_thread);
+        }
+    }
 }
 
-// 서브 모듈로 사용되므로 주석
-// module_init(rotary_init);
-// module_exit(rotary_exit);
+/* Device Tree 매칭 테이블 */
+static const struct of_device_id rotary_of_match[] = {
+    { .compatible = "chan,rotary-encoder", }, // DTS의 compatible 문자열과 일치해야함
+    { }
+};
+MODULE_DEVICE_TABLE(of, rotary_of_match);
+
+// platfomr driver 구조체
+// 하드웨어가 버스(PCI, USB 등)에 연결되어 있지 않을 때 사용함
+
+static struct platform_driver rotary_driver = {
+    .probe = rotary_probe,
+    .remove = rotary_remove,
+    .driver = {
+        .name = "myrotary-encoder", // dmesg에서 이 이름으로 드라이버를 식별할 수 있습니다.
+        .of_match_table = rotary_of_match,
+    },
+};
+
+static int __init rotary_init(void) {
+    pr_info("rotary driver init\n");
+    return platform_driver_register(&rotary_driver);
+}
+
+static void __exit rotary_exit(void) {
+    pr_info("rotary driver exit\n");
+    platform_driver_unregister(&rotary_driver);
+}
+
+module_init(rotary_init);
+module_exit(rotary_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Chan");
-MODULE_DESCRIPTION("Rotary sw submodule");
+MODULE_DESCRIPTION("Rotary switch platform driver with improved debouncing");
