@@ -1,5 +1,3 @@
-
-
 #define pr_fmt(fmt) "[ledbar] " fmt
 
 #include "../rotary/rotary_module.h"
@@ -12,7 +10,6 @@
 
 #define BCM2711_PERI_BASE   0xFE000000
 #define GPIO_BASE           (BCM2711_PERI_BASE + 0x200000)
-
 
 #define GPIO_OUT(g)    (*(gpio + ((g)/10)) |= (1 << (((g)%10)*3)))
 #define GPIO_SET(g)    (*(gpio + 7) = (1 << (g)))
@@ -41,12 +38,30 @@ static void led_write(uint8_t data) {
 }
 
 static int led_fn(void *data) {
-    int prev_count = -1;
-    int prev_toggle = -1;
+
+    /* rotary 모듈이 준비될 때까지 대기 */
+    while (!rotary_is_ready() && !kthread_should_stop()) {
+        pr_info("Waiting for rotary module to be ready...\n");
+        msleep(1000);
+    }
+
+    if (kthread_should_stop()) {
+        pr_info("LED thread stopping before rotary ready\n");
+        return 0;
+    }
+
+    pr_info("Rotary module ready, starting LED updates\n");
 
     while (!kthread_should_stop()) {
+        /* rotary 모듈이 언로드되면 중단 */
+        if (!rotary_is_ready()) {
+            pr_info("Rotary module not ready, stopping LED updates\n");
+            break;
+        }
+
         int count = rotary_get_count();
         int toggle = rotary_get_toggle();
+        int direction = rotary_get_direction();
 
         uint8_t led = 0;
 
@@ -54,18 +69,16 @@ static int led_fn(void *data) {
         led |= (count & 0x0F);
 
         // led5 toggle
-		if (toggle) {
+        if (toggle) {
             led |= (1 << 5);
-		}
+        }
 
         // led6/7: cw ccw
-		int direction = rotary_get_direction();
-		if(direction == 1) {
-           led |= (1 << 7); // CW
-		}
-		else if(direction == -1) {
-           led |= (1 << 6); // CCW
-		}
+        if (direction == 1) {
+            led |= (1 << 7); // CW
+        } else if (direction == -1) {
+            led |= (1 << 6); // CCW
+        }
 
         led_write(led);
         msleep(50);
@@ -77,24 +90,21 @@ static int led_fn(void *data) {
 static int __init ledbar_init(void) {
     int i;
 
-    pr_info(" init\n");
+    pr_info("init\n");
 
-    int ret = rotary_init();
-    if (ret < 0) { 
-        return ret;
-    }
-
+    /* GPIO 메모리 매핑 */
     gpio = ioremap(GPIO_BASE, PAGE_SIZE);
     if (!gpio) {
         pr_err("failed to ioremap GPIO\n");
         return -ENOMEM;
     }
 
-    // GPIO 배열 출력으로 설정
+    /* GPIO 배열 출력으로 설정 */
     for (i = 0; i < LED_COUNT; i++) {
         GPIO_OUT(gpio_led[i]);
     }
 
+    /* LED 스레드 시작 */
     led_thread = kthread_run(led_fn, NULL, "ledbar_thread");
     if (IS_ERR(led_thread)) {
         pr_err("failed to create LED thread\n");
@@ -102,19 +112,22 @@ static int __init ledbar_init(void) {
         return PTR_ERR(led_thread);
     }
 
+    pr_info("ledbar module initialized (waiting for rotary module)\n");
     return 0;
 }
 
 static void __exit ledbar_exit(void) {
-    pr_info(" exit\n");
+    pr_info("exit\n");
 
-    rotary_exit();
-
-    if (led_thread)
+    if (led_thread) {
         kthread_stop(led_thread);
+        led_thread = NULL;
+    }
 
-    if (gpio)
+    if (gpio) {
         iounmap(gpio);
+        gpio = NULL;
+    }
 }
 
 module_init(ledbar_init);
