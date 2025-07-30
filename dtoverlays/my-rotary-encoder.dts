@@ -1,0 +1,42 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711"; // 라즈베리 파이 4 호환
+
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            rotary_encoder: rotary-encoder {
+                // *** 1. 당신의 커스텀 드라이버에 매칭되는 compatible 문자열 ***
+                compatible = "chan,rotary-encoder"; 
+                status = "okay";
+                
+                // *** 2. 당신의 드라이버가 devm_gpiod_get으로 찾을 이름들 ***
+                rotary-s1-gpios = <&gpio 17 0>; // GPIO 17 (채널 A)
+                rotary-s2-gpios = <&gpio 27 0>; // GPIO 27 (채널 B)
+                rotary-key-gpios = <&gpio 22 0>; // GPIO 22 (버튼) - 실제 핀 번호 확인!
+                
+                // (선택 사항) 아래 속성들은 당신의 드라이버에서 사용하지 않으므로, 
+                // 혼동을 피하기 위해 DTS에서 제거하는 것을 권장합니다.
+                // linux,axis = <0>;
+                // rotary-encoder,encoding = "gray";
+                // rotary-encoder,steps = <24>;
+            };
+        };
+    };
+    
+    // 이 fragment는 GPIO 핀 자체의 설정을 위한 것입니다 (풀업/다운, 기능).
+    fragment@1 {
+        target = <&gpio>;
+        __overlay__ {
+            rotary_pins: rotary_pins {
+                // GPIO 17, 27, 22번 핀을 설정합니다.
+                // 이 핀들은 로터리 엔코더와 버튼에 사용됩니다.
+                brcm,pins = <17 27 22>; // 사용하는 모든 GPIO 핀 번호를 여기에 포함
+                brcm,function = <0>; /* GPIO_IN (입력) */
+                brcm,pull = <2>; /* GPIO_PULLUP (풀업) */
+            };
+        };
+    };
+};
