@@ -25,9 +25,171 @@
 
 #define DEVICE_NAME "my_i2c_sample"
 
+
 static dev_t my_i2c_sample_dev_num;
 static struct cdev my_i2c_sample_cdev;
 static struct class* my_i2c_sample_class;
+
+
+static const int OSS_WAIT_TIME_MS[4] = { 5, 8, 14, 26 };
+
+// temp 보정값을 적용하여 반환
+static s32 bmp180_calc_temperature(struct bmp180_data* data, s32 ut)
+{
+    s32 x1, x2, t;
+
+    x1 = ((ut - data->calib.AC6) * data->calib.AC5) >> 15;
+    x2 = (data->calib.MC << 11) / (x1 + data->calib.MD);
+
+    data->calib.B5 = x1 + x2;
+    t = (data->calib.B5 + 8) >> 4;
+
+    return t;
+}
+
+// pressure 보정값을 적용하여 반환
+static s32 bmp180_calc_pressure(struct bmp180_data* data, s32 up)
+{
+    s32 b6, x1, x2, x3, b3;
+    u32 b4, b7;
+    s32 p;
+
+    b6 = data->calib.B5 - 4000;
+
+    x1 = (data->calib.B2 * ((b6 * b6) >> 12)) >> 11;
+    x2 = (data->calib.AC2 * b6) >> 11;
+    x3 = x1 + x2;
+    b3 = (((data->calib.AC1 * 4 + x3) << data->oss) + 2) >> 2;
+
+    x1 = (data->calib.AC3 * b6) >> 13;
+    x2 = (data->calib.B1 * ((b6 * b6) >> 12)) >> 16;
+    x3 = ((x1 + x2) + 2) >> 2;
+
+    b4 = (data->calib.AC4 * (u32)(x3 + 32768)) >> 15;
+    b7 = ((u32)up - b3) * (50000 >> data->oss);
+
+    if (b7 < 0x80000000)
+        p = (b7 * 2) / b4;
+    else
+        p = (b7 / b4) * 2;
+
+    x1 = (p >> 8) * (p >> 8);
+    x1 = (x1 * 3038) >> 16;
+    x2 = (-7357 * p) >> 16;
+
+    p = p + ((x1 + x2 + 3791) >> 4);
+
+    return p;
+}
+
+// calb 테이블을 설정하기 위해 register를 읽어 table을 저장하는 함수
+static int bmp180_read_calib(struct bmp180_data* data, struct bmp180_calib* calib) {
+
+    pr_info("Calibration read start\n");
+
+    uint8_t raw[CALIB_DATA_LENGTH];
+    
+    int ret = my_i2c_write_bytes(data->slave_addr, CALIB_DATA_START);
+    if (ret != I2C_ERR_NONE) { 
+        return -EIO;
+    }
+
+    ret = my_i2c_read_bytes(data->slave_addr, raw, CALIB_DATA_LENGTH);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+    int16_t* table[] = {
+        &calib->AC1, &calib->AC2, &calib->AC3,
+        (int16_t*)&calib->AC4, (int16_t*)&calib->AC5, (int16_t*)&calib->AC6,
+        &calib->B1, &calib->B2,
+        &calib->MB, &calib->MC, &calib->MD
+    };
+
+    for (int i = 0; i < CALIB_DATA_LENGTH / 2; i++) {
+        *table[i] = (int16_t)(raw[2 * i] << 8 | raw[2 * i + 1]);
+    }
+
+    return 0;
+}
+
+
+
+
+// 온도 읽기
+static int bmp180_read_temperature(struct bmp180_data* data, int32_t* out_temp) {
+
+    uint8_t temp_cmd[2] = { CTRL_MEAS, TEMP };
+    uint8_t rx[2];
+    int ret;
+
+    ret = my_i2c_write_bytes(data->slave_addr, temp_cmd, 2);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+    msleep(OSS_WAIT_TIME_MS[0]);
+
+    // 측정 결과 MSB 부터 read
+
+    ret = my_i2c_write_byte(data->slave_addr, OUT_MSB);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+
+    ret = my_i2c_read_bytes(data->slave_addr, rx, 2);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+    // 측정 값 보정 연산
+    bmp180_calc_temperature();
+    int32_t ut = (rx[0] << 8) | rx[1];
+    int32_t x1 = ((ut - data->calib.AC6) * data->calib.AC5) >> 15;
+    int32_t x2 = (data->calib.MC << 11) / (x1 + data->calib.MD);
+    data->calib.B5 = x1 + x2;
+    *out_temp = (data->calib.B5 + 8) >> 4;
+
+    return 0;
+}
+
+// 압력 읽기
+static int bmp180_read_pressure(struct bmp180_data* data, int32_t* out_pressure) {
+
+
+    uint8_t ctrl_value = PRESSURE | (data->oss << 6);
+    uint8_t cmd[2] = { CTRL_MEAS, ctrl_value };
+    uint8_t rx[3];
+    int ret;
+
+    // 측정 명령
+    ret = my_i2c_write_bytes(data->slave_addr, cmd, 2);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+    msleep(OSS_WAIT_TIME_MS[data->oss]);
+
+    // 측정 read, MSB부터 read
+    ret = my_i2c_write_byte(data->slave_addr, OUT_MSB);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+    ret = my_i2c_read_bytes(data->slave_addr, rx, 3);
+    if (ret != I2C_ERR_NONE) {
+        return -EIO;
+    }
+
+    // uncompensated pressure 계산
+    s32 u_pressure = ((rx_data[BMP_MSB] << 16) | (rx_data[BMP_LSB] << 8) | rx_data[BMP_XLSB] >> (8 - data->oss));
+
+    *out_pressure = bmp180_calc_pressure(data, u_pressure);
+
+	return 0;
+}
+
 
 // read
 static ssize_t my_i2c_sample_read(struct file* file, char __user* buf, size_t count, loff_t* ppos) {
@@ -48,6 +210,8 @@ static ssize_t my_i2c_sample_read(struct file* file, char __user* buf, size_t co
 static int my_i2c_sample_open(struct inode *inode, struct file *file) {
 
     pr_info("my_i2c_sample open called\n");
+
+    my_i2c_init_gpio();
     my_i2c_debug();
 
     struct my_i2c_session *sess;
@@ -61,7 +225,7 @@ static int my_i2c_sample_open(struct inode *inode, struct file *file) {
     sess->slave_addr = SAMPLE_ADDR;
     file->private_data = sess;
 
-    my_i2c_scan(sess->slave_addr);
+    my_i2c_ping(sess->slave_addr);
 
     pr_info("my_i2c_sample session created with slave address: 0x%02X\n", sess->slave_addr);
     return 0;

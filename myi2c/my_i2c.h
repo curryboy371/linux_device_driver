@@ -51,8 +51,10 @@ typedef enum {
     I2C_DELAY_COUNT             // 배열 크기 확인용
 } i2c_delay_t;
 
-// my_i2c driver scan
-i2c_error_t my_i2c_scan(uint8_t slave_addr);
+void my_i2c_init_gpio(void);
+
+// my_i2c driver ping
+i2c_error_t my_i2c_ping(uint8_t slave_addr);
 
 // slave 주소에서 여러 바이트 읽기
 i2c_error_t my_i2c_read_bytes(uint8_t slave_addr, uint8_t *data, size_t len);
