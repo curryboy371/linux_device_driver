@@ -15,16 +15,15 @@
 #include "my_i2c.h"
 #include "my_i2c_sample.h"
 
-
 /*
     my_i2c 사용 방법에 대한 i2c device driver smaple
 */
 
 // my_i2c_sample slave address
-#define SAMPLE_ADDR 0x23
+#define SAMPLE_ADDR 0x77
+#define MAX_BUF_SIZE 128
 
 #define DEVICE_NAME "my_i2c_sample"
-
 
 static dev_t my_i2c_sample_dev_num;
 static struct cdev my_i2c_sample_cdev;
@@ -48,17 +47,24 @@ static ssize_t my_i2c_sample_read(struct file* file, char __user* buf, size_t co
 // open
 static int my_i2c_sample_open(struct inode *inode, struct file *file) {
 
+    pr_info("my_i2c_sample open called\n");
+    my_i2c_debug();
+
     struct my_i2c_session *sess;
 
     sess = kmalloc(sizeof(*sess), GFP_KERNEL);
     if (!sess) {
+        pr_err("Failed to allocate memory for session\n");
         return -ENOMEM;
     }
 
     sess->slave_addr = SAMPLE_ADDR;
     file->private_data = sess;
-    return 0;
 
+    my_i2c_scan(sess->slave_addr);
+
+    pr_info("my_i2c_sample session created with slave address: 0x%02X\n", sess->slave_addr);
+    return 0;
 }
 
 static ssize_t my_i2c_sample_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
@@ -90,6 +96,7 @@ static ssize_t my_i2c_sample_write(struct file *file, const char __user *buf, si
 static int my_i2c_sample_release(struct inode *inode, struct file *file) {
     struct my_i2c_session *sess = file->private_data;
     
+    pr_info("my_i2c_sample release called\n");
     if(sess) {
         kfree(sess);
     }
@@ -111,8 +118,7 @@ static int __init my_sample_i2c_init(void) {
 
     int ret = 0;
 
-    pr_info("driver init...\n");
-
+    pr_info("my_i2c_sample driver init\n");
 
     // Character Device 등록 - device 번호 할당
     ret = alloc_chrdev_region(&my_i2c_sample_dev_num, 0, 1, DEVICE_NAME);
@@ -153,8 +159,6 @@ static int __init my_sample_i2c_init(void) {
         return ret;
     }
 
-
-
     pr_info("driver loaded successfully (Major: %d, Minor: %d)\n", MAJOR(my_i2c_sample_dev_num), MINOR(my_i2c_sample_dev_num));
     return 0;
 
@@ -163,7 +167,8 @@ static int __init my_sample_i2c_init(void) {
 // exit
 static void __exit my_sample_i2c_exit(void) {
 
-    pr_info("driver exit...\n");
+
+    pr_info("my_i2c_sample driver exit\n");
 
     // 디바이스 제거
     device_destroy(my_i2c_sample_class, my_i2c_sample_dev_num);
@@ -177,7 +182,7 @@ static void __exit my_sample_i2c_exit(void) {
     // 디바이스 번호 해제
     unregister_chrdev_region(my_i2c_sample_dev_num, 1);
 
-    pr_info("driver exit successfully\n");
+    pr_info("my_i2c_sample driver removed\n");
 }
 
 
@@ -187,4 +192,3 @@ module_exit(my_sample_i2c_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Chan");
 MODULE_DESCRIPTION("MY I2C Sample Character Device Driver");
-MODULE_VERSION("0.1");

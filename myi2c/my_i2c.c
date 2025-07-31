@@ -1,216 +1,344 @@
 // pr_debug, pr_info, pr_err 메시지 접두사 macro
 #define pr_fmt(fmt) "[my_i2c] " fmt
 
-#include <linux/module.h>        // module_init, module_exit, MODULE_LICENSE 등
-#include <linux/fs.h>            // character device
-#include <linux/cdev.h>          // cdev
-#include <linux/gpio.h>          // gpio 사용
-#include <linux/device.h>        // device 등록
-
-#include <linux/uaccess.h>   // copy_from_user, copy_to_user
-#include <linux/delay.h>         // udelay
-
-#include <linux/kernel.h> // pr log
-
+#include "my_i2c.h"
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/gpio/consumer.h>
+#include <linux/kernel.h>
+#include <linux/delay.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/mutex.h>
 
-#include "my_i2c.h"
 
 
 
 /*
-
+    i2c protocol을 위한 platform driver
 
 */
 
+
+#define I2C_ADDR_WRITE(addr)  ((addr) << 0x01) // Write mode: LSB 0
+#define I2C_ADDR_READ(addr)   (((addr) << 0x01) | 0x01)
+
 #define DEVICE_NAME "my_i2c"
+#define I2C_SDA_GPIO_NAME "myi2c-sda"
+#define I2C_SCL_GPIO_NAME "myi2c-scl"
+
+static const unsigned int i2c_delays_us[I2C_DELAY_COUNT] = {
+    [I2C_DELAY_START_HOLD]    = 5,    // START hold time: 4.0us
+    [I2C_DELAY_SCL_LOW_HOLD]  = 5,    // SCL LOW hold time: 4.7us → 여유 있게 5us
+    [I2C_DELAY_SCL_HIGH_HOLD] = 5,    // SCL HIGH hold time: 4.0us
+    [I2C_DELAY_STOP_SETUP]    = 5,    // STOP setup time: 4.0us
+    [I2C_DELAY_SDA_HOLD]      = 6,    // SDA data hold time: 5.0us
+    [I2C_DELAY_RESTART_COND]  = 5,    // Restart 조건 (Bus free time): 4.7us
+    [I2C_DELAY_TEMP]          = 1,    // 임시 딜레이 : 1us
+    [I2C_DELAY_ACK_TIMEOUT]   = 2     // ACK polling 간격: 2us
+};
+
+
+// my_i2c driver 데이터 구조체
+struct my_i2c_data {
+    struct gpio_desc *sda_desc;
+    struct gpio_desc *scl_desc;
+    i2c_state_t state; // 현재 I2C 상태
+    int ready; // 드라이버 준비 상태
+    struct mutex lock;
+};
+
+static struct my_i2c_data *g_my_i2c_data = NULL; // 전역 데이터 포인터
+
+
+// 내부 함수 전방선언
+static i2c_error_t my_i2c_master_ack(struct my_i2c_data *data, int ack);
+static i2c_error_t my_i2c_start(struct my_i2c_data *data);
+static i2c_error_t my_i2c_stop(struct my_i2c_data *data);
+static i2c_error_t my_i2c_ack(struct my_i2c_data *data);
+static i2c_error_t my_i2c_read(struct my_i2c_data *data, uint8_t *byte, int send_ack);
+static i2c_error_t my_i2c_write(struct my_i2c_data *data, uint8_t byte);
+
+// my i2c 버스 스캔 함수
+i2c_error_t my_i2c_scan(uint8_t slave_addr) {
+    pr_info("Scanning I2C bus...\n");
+
+    if (!g_my_i2c_data || !g_my_i2c_data->ready) {
+        pr_err("I2C not ready\n");
+        return I2C_ERR_NOT_READY;
+    }
+
+    int sda1 = gpiod_get_value(g_my_i2c_data->sda_desc);
+    int scl1 = gpiod_get_value(g_my_i2c_data->scl_desc);
+    pr_info("scan : SDA=%d SCL=%d\n", sda1, scl1);
+
+
+    i2c_error_t err;
+
+    // START
+    err = my_i2c_start(g_my_i2c_data);
+    if(err != I2C_ERR_NONE) {
+        pr_err("Failed to start I2C bus\n");
+    } else {
+        // WRITE address only, expect ACK
+        err = my_i2c_write(g_my_i2c_data, I2C_ADDR_WRITE(slave_addr));
+
+        // STOP
+        my_i2c_stop(g_my_i2c_data);
+
+        if (err == I2C_ERR_NONE) {
+            pr_info("Found device at 0x%02X\n", slave_addr);
+        }else {
+            pr_err("No ACK from device at 0x%02X err %d\n", slave_addr, err);
+        }
+
+
+    }
+
+
+    pr_info("I2C scan done.\n");
+
+    return I2C_ERR_NONE;
+}
+
+// slave 주소에서 여러 바이트 읽기
+i2c_error_t my_i2c_read_bytes(uint8_t slave_addr, uint8_t *data, size_t len) {
+
+    i2c_error_t err = I2C_ERR_NONE;
+
+    if (!g_my_i2c_data || !g_my_i2c_data->ready) {
+        pr_err("I2C not ready\n");
+        return I2C_ERR_NOT_READY;
+    }
+
+    if ((err = my_i2c_start(g_my_i2c_data)) != I2C_ERR_NONE) {
+        return err;
+    }
+
+    // 7bit address + Read(1)
+    if ((err = my_i2c_write(g_my_i2c_data, I2C_ADDR_READ(slave_addr))) != I2C_ERR_NONE) {
+        my_i2c_stop(g_my_i2c_data);
+        return err;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        int ack = (i < len - 1) ? I2C_ACK : I2C_NACK;  // 마지막 바이트에는 NACK
+        if ((err = my_i2c_read(g_my_i2c_data, &data[i], ack)) != I2C_ERR_NONE) {
+            my_i2c_stop(g_my_i2c_data);
+            return err;
+        }
+    }
+
+    if ((err = my_i2c_stop(g_my_i2c_data)) != I2C_ERR_NONE) {
+        return err;
+    }
+
+    return I2C_ERR_NONE;
+}
+
+// slave 주소에 여러 바이트 쓰기
+i2c_error_t my_i2c_write_bytes(uint8_t addr, const uint8_t *data, size_t len) {
+
+    i2c_error_t err;
+
+    if(!g_my_i2c_data || !g_my_i2c_data->ready) {
+        pr_err("I2C not ready\n");
+        return I2C_ERR_NOT_READY;
+    }
+    
+    if ((err = my_i2c_start(g_my_i2c_data)) != I2C_ERR_NONE)
+        return err;
+
+    // Write mode: LSB 0
+    
+    if ((err = my_i2c_write(g_my_i2c_data, I2C_ADDR_WRITE(addr))) != I2C_ERR_NONE) {
+        my_i2c_stop(g_my_i2c_data);
+        return err;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        if ((err = my_i2c_write(g_my_i2c_data, data[i])) != I2C_ERR_NONE) {
+            my_i2c_stop(g_my_i2c_data);
+            return err;
+        }
+    }
+
+    // Stop condition
+    if((err = my_i2c_stop(g_my_i2c_data)) != I2C_ERR_NONE) {
+        return err;
+    }
+    return I2C_ERR_NONE;
+}
+
+// 레지스터 주소에 여러 바이트 쓰기
+i2c_error_t my_i2c_write_reg(uint8_t slave_addr, uint8_t reg, const uint8_t *data, size_t len) {
+
+    return I2C_ERR_NONE;
+
+}
+
+// 레지스터 주소에서 여러 바이트 읽기
+i2c_error_t my_i2c_read_reg(uint8_t slave_addr, uint8_t reg, uint8_t *data, size_t len) {
 
 
 
-// mutex 로 동시 접근 처리
-// mutex 처리는 추후
-static DEFINE_MUTEX(my_i2c_lock);
+    return I2C_ERR_NONE;
+}
 
-static i2c_state_t my_i2c_state = I2C_STATE_IDLE;
+// 디버그용 함수
+void my_i2c_debug(void) {
 
+    if (!g_my_i2c_data) {
+        return;
+    }
 
-static dev_t my_i2c_dev_num;
-static struct cdev my_i2c_cdev;
-static struct class *my_i2c_class;
+    int sda1 = gpiod_get_value(g_my_i2c_data->sda_desc);
+    int scl1 = gpiod_get_value(g_my_i2c_data->scl_desc);
+
+    int sda_dir = gpiod_get_direction(g_my_i2c_data->sda_desc);  // 0: output, 1: input
+    int scl_dir = gpiod_get_direction(g_my_i2c_data->scl_desc);
+
+    pr_info("state %d SDA=%d (%s) SCL=%d (%s)\n",
+        g_my_i2c_data->state,
+        sda1,
+        sda_dir == 0 ? "OUT" : "IN",
+        scl1,
+        scl_dir == 0 ? "OUT" : "IN");
+}
 
 
 
 // i2c start condition
-i2c_error_t my_i2c_start(void) {
+static i2c_error_t my_i2c_start(struct my_i2c_data *data) {
 
-    int ret = 0;
-	// scl이 high 상태일 때 sda 라인이 high to low로 전환
-	// 초기상태 scl high
-    
-
-	// SDA OUTPUT + LOW
-	ret = gpio_direction_output(I2C_SDA_GPIO, LOW);
-    if(ret < 0) {
-        pr_err("Failed to set SDA GPIO as output\n");
-        return I2C_ERR_UNKNOWN;
+    if (!data->ready) {
+        return I2C_ERR_NOT_READY;
     }
 
+    mutex_lock(&data->lock);
+
+    pr_info("my_i2c_start\n");
+    my_i2c_debug();
+
+    data->state = I2C_STATE_START;
+
+	// SDA OUTPUT + LOW
 	// start hold time : 4.0us 
-	udelay(4);
+    gpiod_direction_output(data->sda_desc, LOW);  // output 모드 + HIGH
+	udelay(i2c_delays_us[I2C_DELAY_START_HOLD]);
+
+
+
 	
 	// clock
 	// scl low hold time ( 4.7us)
-	gpio_set_value(I2C_SCL_GPIO, LOW);
-	udelay(4.7);
+    gpiod_set_value(data->scl_desc, LOW);
+	udelay(i2c_delays_us[I2C_DELAY_SCL_LOW_HOLD]);
+
+    pr_info("start after clk low \n");
+    my_i2c_debug();
+
 
 	// scl high hold time ( 4.0us)
-	gpio_set_value(I2C_SCL_GPIO, HIGH);
-	udelay(4.0);
+    gpiod_set_value(data->scl_desc, HIGH);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+
+    pr_info("start after clk high \n");
+    my_i2c_debug();
+
+    mutex_unlock(&data->lock);
 
     return I2C_ERR_NONE;
 }
 	
-i2c_error_t my_i2c_stop(void) {
+static i2c_error_t my_i2c_stop(struct my_i2c_data *data) {
 
-	// scl이 high 일 때 sda 라인이 low에서 high로 전환
-
-    // SDA stop condition output + LOW (SDA HIGH 보장을 위함)
-    if (gpio_direction_output(I2C_SDA_GPIO, LOW) < 0) {
-        pr_err("Failed to set SDA LOW for stop condition\n");
-        return I2C_ERR_UNKNOWN;
+    if (!data->ready) {
+        return I2C_ERR_NOT_READY;
     }
 
+    mutex_lock(&data->lock);
 
-	// stop setup time 4.0 us
-    // scl high hold time 4.0 us
-	gpio_set_value(I2C_SCL_GPIO, HIGH);
-	udelay(4.0);
+    data->state = I2C_STATE_STOP;
+
+
+    // SDA를 LOW로 내리고 -> STOP 조건 위해 준비
+    gpiod_direction_output(data->sda_desc, LOW);
+
+    // stop setup time 4.0 us ( scl high hold time 4.0 us )
+    // SCL을 HIGH로 올림 (SCL HIGH일 때 SDA LOW → HIGH 전이 발생해야 함)
+    gpiod_set_value(data->scl_desc, HIGH);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+
 
     // SDA HIGH stop condition
-    gpio_set_value(I2C_SDA_GPIO, HIGH);
-
+    // STOP condition (SCL HIGH 상태에서 SDA LOW → HIGH)
+    gpiod_set_value(data->sda_desc, HIGH);
 
 	// bus free time( sda high hold time 대체)
 	// restart condition 4.7us
-	udelay(4.7);
-	
+    udelay(i2c_delays_us[I2C_DELAY_RESTART_COND]);
+
+
+    mutex_unlock(&data->lock);
 
     return I2C_ERR_NONE;
-
-}
-
-i2c_error_t my_i2c_write_byte(uint8_t data) {
-
-	// write byte
-
-    // 여기 들어올 때 scl은 HIGH 상태여야 함
-	
-	// msb to lsb 
-	for(int i = 7; i >= 0; --i) {
-
-        // scl low
-        // scl low hold time 4.7us
-        gpio_set_value(I2C_SCL_GPIO, LOW);
-	    udelay(4.7);
-
-        // sda 라인에 data bit write
-		if(gpio_direction_output(I2C_SDA_GPIO, (data >> i) & 1) < 0) {
-            pr_err("Failed to set SDA GPIO as output\n");
-            return I2C_ERR_UNKNOWN;
-        }
-
-        // sda hold time 5.0us
-        udelay(5);
-
-        // scl high setup time 250ns
-        // 이 time은 sda hold time에 종속됨
-        // udelay(0.25); // 250ns
-        
-        // scl low to high
-        gpio_set_value(I2C_SCL_GPIO, HIGH);
-
-        // scl high hold time 4.0us
-        udelay(4.0);
-	}
-
-    return I2C_ERR_NONE;
-
-}
-
-i2c_error_t my_i2c_read_byte(uint8_t *byte, int send_ack) {
-
-
-    i2c_error_t ret = I2C_ERR_NONE;
-    int data = 0;
-
-
-    // SDA를 입력 모드로 설정
-    if(gpio_direction_input(I2C_SDA_GPIO) < 0) {
-        pr_err("Failed to set SDA GPIO as input\n");
-        return I2C_ERR_UNKNOWN;
-    } 
-
-    for(int i =0; i < 8; ++i) {
-
-        // SCL low hold time 4.7us
-        gpio_set_value(I2C_SCL_GPIO, LOW);
-        udelay(4.7);
-
-        // SCL high hold time 4.0us
-        gpio_set_value(I2C_SCL_GPIO, HIGH);
-        udelay(4.0);
-
-        data <<= 1;
-        // SDA 확인 후 data에 입력
-        if(gpio_get_value(I2C_SDA_GPIO)) {
-            data |= 1;  // 1 입력
-        } else {
-            data &= ~1; // 0 입력
-        }
-    }
-
-    // Master ACK/NACK
-    ret = my_i2c_master_ack(send_ack);
-    if(ret != I2C_ERR_NONE) {
-        return ret;
-    }
-
-    *byte = data;
-
-    return ret;
 }
 
 
 // slave의 receiver acknowledge
-i2c_error_t my_i2c_ack(void) {
+i2c_error_t my_i2c_ack(struct my_i2c_data *data) {
 
     int ack_received = 0;
 
-    // slave to master ack
-
-    // scl은 HIGH 상태여야 함
-
-    // sda를 input mode
-    gpio_direction_input(I2C_SDA_GPIO); 
-
-    // scl low hold time 4.7us
-    gpio_set_value(I2C_SCL_GPIO, LOW);
-    udelay(4.7);
-
-    // scl low to high
-    gpio_set_value(I2C_SCL_GPIO, HIGH);
-
-    // ACK 수신 대기
-    for(int i = 0; i < I2C_ACK_TIMEOUT_US; ++i) {
-        if(gpio_get_value(I2C_SDA_GPIO) == I2C_ACK) {
-            ack_received = 1; // ACK 수신
-            break;
-        }
-        udelay(1);
+    if (!data->ready) {
+        return I2C_ERR_NOT_READY;
     }
 
+    mutex_lock(&data->lock);
+    data->state = I2C_STATE_ACK_CHECK;
+
+    // // SDA input mode
+    // gpiod_direction_input(data->sda_desc);
+
+
+    int sda1 = gpiod_get_value(data->sda_desc);
+    pr_info("ack pre clock : SDA=%d\n", sda1);
+
+
+    // SCL LOW → clock falling edge
+    gpiod_set_value(data->scl_desc, LOW);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_LOW_HOLD]);
+
+    sda1 = gpiod_get_value(data->sda_desc);
+    pr_info("ack low clock : SDA=%d\n", sda1);
+
+
+    // scl low to high
     // scl high hold time 4.0us
-    udelay(4.0);
+    gpiod_set_value(data->scl_desc, HIGH);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+
+    sda1 = gpiod_get_value(data->sda_desc);
+    pr_info("ack high clock : SDA=%d\n", sda1);
+
+
+    // ACK 확인 루프
+    for (int i = 0; i < I2C_ACK_TIMEOUT_US; i+=i2c_delays_us[I2C_DELAY_ACK_TIMEOUT]) {
+
+        int sda = gpiod_get_value(data->sda_desc);
+        //pr_info("ACK Check %d: SDA=%d\n", i, sda);
+        if (sda == I2C_ACK) {
+            ack_received = 1;
+            break;
+        }
+
+        udelay(i2c_delays_us[I2C_DELAY_ACK_TIMEOUT]);
+    }
+
+
+    mutex_unlock(&data->lock);
 
     // ACK 수신 실패
     if(!ack_received) {
@@ -219,251 +347,280 @@ i2c_error_t my_i2c_ack(void) {
     }
 
     return I2C_ERR_NONE;
-
 }
 
 // master의 receiver acknowledge
-i2c_error_t my_i2c_master_ack(int ack) {
+i2c_error_t my_i2c_master_ack(struct my_i2c_data *data, int ack) {
+
+    if (!data->ready) {
+        return I2C_ERR_NOT_READY;
+    }
+
+    mutex_lock(&data->lock);
+
+    data->state = I2C_STATE_MASTER_ACK;
 
     // scl은 HIGH 상태여야 함
 
+    // SCL LOW 상태에서 SDA 출력 설정
     // scl low hold time 4.7us
-    gpio_set_value(I2C_SCL_GPIO, LOW);
-    udelay(4.7);
+    gpiod_set_value(data->scl_desc, LOW);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_LOW_HOLD]);
 
-    // sda를 input mode
-    if(gpio_direction_output(I2C_SDA_GPIO, ack) < 0) {
-        pr_err("Failed to set SDA GPIO as output\n");
-        return I2C_ERR_UNKNOWN;
-    }
+    // SDA를 출력 모드 + ack 값 설정 (0: ACK, 1: NACK)
+    gpiod_direction_output(data->sda_desc, ack);
 
     // scl low to high
-    gpio_set_value(I2C_SCL_GPIO, HIGH);
-
     // scl high hold time 4.0us
-    udelay(4.0);
+    gpiod_set_value(data->scl_desc, HIGH);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+
+    mutex_unlock(&data->lock);
 
     return I2C_ERR_NONE;
 }
 
-static int my_i2c_open(struct inode *inode, struct file *file) {
-    pr_info("device opened\n");
 
+static i2c_error_t my_i2c_write(struct my_i2c_data *data, uint8_t byte) {
+
+    i2c_error_t ret = I2C_ERR_NONE;
+
+    if (!data->ready) {
+        return I2C_ERR_NOT_READY;
+    }
+
+    mutex_lock(&data->lock);
+
+    data->state = I2C_STATE_SEND_DATA;
+
+    pr_info("my_i2c_write: byte=0x%02X\n", byte);
+	// write byte
+
+    // 여기 들어올 때 scl은 HIGH 상태여야 함
+	
+	// msb to lsb 
+    for (int i = 7; i >= 0; --i) {
+
+        // scl low
+        // scl low hold time 4.7us
+        gpiod_set_value(data->scl_desc, LOW);
+        udelay(i2c_delays_us[I2C_DELAY_SCL_LOW_HOLD]);
+
+        // SDA 출력 설정 + bit write
+        // sda hold time 5.0us
+        int bit = (byte >> i) & 0x01;
+        gpiod_direction_output(data->sda_desc, bit);
+
+        pr_info("write \n");
+        my_i2c_debug();
+
+        udelay(i2c_delays_us[I2C_DELAY_SDA_HOLD]);
+        
+        // scl high setup time 250ns
+        // 이 time은 sda hold time에 종속됨
+        // udelay(0.25); // 250ns
+
+        // scl low to high
+        // scl high hold time 4.0us
+        gpiod_set_value(data->scl_desc, HIGH);
+        udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+    }
+
+
+    // 확인
+    pr_info("after write\n");
+    my_i2c_debug();
+
+    // SCL LOW → clock falling edge
+    gpiod_set_value(data->scl_desc, LOW);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_LOW_HOLD]);
+
+    pr_info("after low clock\n");
+    my_i2c_debug();
+
+
+    // 즉시 input 모드로 전환
+    gpiod_direction_input(data->sda_desc);
+    udelay(i2c_delays_us[I2C_DELAY_TEMP]);
+
+    
+    pr_info("after inputmode clock\n");
+    my_i2c_debug();
+
+    // scl low to high
+    // scl high hold time 4.0us
+    gpiod_set_value(data->scl_desc, HIGH);
+    udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+
+        
+    pr_info("after high clock clock\n");
+    my_i2c_debug();
+
+
+    // ACK 확인 루프
+    int ack_received = 0;
+    for (int i = 0; i < I2C_ACK_TIMEOUT_US; i+=i2c_delays_us[I2C_DELAY_ACK_TIMEOUT]) {
+
+        int sda = gpiod_get_value(data->sda_desc);
+        //pr_info("ACK Check %d: SDA=%d\n", i, sda);
+        if (sda == I2C_ACK) {
+            ack_received = 1;
+            break;
+        }
+
+        udelay(i2c_delays_us[I2C_DELAY_ACK_TIMEOUT]);
+    }
+
+    mutex_unlock(&data->lock);
+
+    if(ack_received) {
+        pr_info("ACK received\n");
+    } else {
+        pr_err("ACK not received\n");
+        return I2C_ERR_NO_ACK;
+    }
+
+    // // ACK check
+    // if ((ret = my_i2c_ack(data)) != I2C_ERR_NONE) {
+    //     return ret;
+    // }
+
+    return I2C_ERR_NONE;
+}
+
+static i2c_error_t my_i2c_read(struct my_i2c_data *data, uint8_t *byte, int send_ack) {
+
+    i2c_error_t ret = I2C_ERR_NONE;
+    int read_data = 0;
+
+    if (!data->ready) {
+        return I2C_ERR_NOT_READY;
+    }
+
+    mutex_lock(&data->lock);
+
+    // SDA input mode
+    gpiod_direction_input(data->sda_desc);
+
+    for (int i = 0; i < 8; ++i) {
+        // SCL low hold time 4.7us
+        gpiod_set_value(data->scl_desc, LOW);
+        udelay(i2c_delays_us[I2C_DELAY_SDA_HOLD]);
+
+        // SCL high hold time 4.0us
+        gpiod_set_value(data->scl_desc, HIGH);
+        udelay(i2c_delays_us[I2C_DELAY_SCL_HIGH_HOLD]);
+
+        // 3. SDA 상태 읽기
+        read_data <<= 0x01;
+        if (gpiod_get_value(data->sda_desc)) {
+            read_data |= 0x01;  // SDA가 HIGH면 1
+        }
+    }
+
+    mutex_unlock(&data->lock);
+
+    // Master ACK/NACK
+    if ((ret = my_i2c_master_ack(data, send_ack)) != I2C_ERR_NONE) {
+        return ret;
+    }
+
+    *byte = read_data;
+
+    return ret;
+}
+
+/* --- 플랫폼 드라이버 등록 --- */
+static int my_i2c_probe(struct platform_device *pdev) {
+    struct device *dev = &pdev->dev;
+    struct my_i2c_data *data;
+    
+    pr_info("platform driver probed started\n");
+    
+    data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+    if (!data) {
+        return -ENOMEM;
+    }
+        
+    // device tree gpio와 매칭
+    // devm은 리소스 자동 관리
+
+    // sda : output + high
+    data->sda_desc = devm_gpiod_get(dev, I2C_SDA_GPIO_NAME, GPIOD_OUT_HIGH);
+    if (IS_ERR(data->sda_desc)) {
+        pr_err("Failed to get sda_desc: %ld\n", PTR_ERR(data->sda_desc));
+        return PTR_ERR(data->sda_desc);
+    }
+
+    // scl : output + high ( 초기 상태)
+    data->scl_desc = devm_gpiod_get(dev, I2C_SCL_GPIO_NAME, GPIOD_OUT_HIGH);
+    if (IS_ERR(data->scl_desc)) {
+        pr_err("Failed to get scl_desc: %ld\n", PTR_ERR(data->scl_desc));
+        return PTR_ERR(data->scl_desc);
+    }
+
+
+    // 초기 상태 설정
+    data->state = I2C_STATE_IDLE;
+
+
+    // mutex 초기화
+    mutex_init(&data->lock);
+
+    // 플랫폼 디바이스와 this driver간 data를 공유하도록 set
+    platform_set_drvdata(pdev, data);
+    g_my_i2c_data = data;
+
+    my_i2c_debug();
+
+    // rotary ready ok
+    data->ready = 1;
+    pr_info("platform driver probed successfully\n");
+    
     return 0;
 }
 
-static int my_i2c_release(struct inode *inode, struct file *file) {
-    pr_info("device closed\n");
-
-    return 0;
-}
-
-static ssize_t my_i2c_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
-    pr_info("read called\n");
-
-    struct my_i2c_session *sess = file->private_data;
-    if(sess == NULL) {
-        pr_err("Session not initialized\n");
-        return -EINVAL;
-    }
-
-
-    if(sess->slave_addr == 0x00) {
-        pr_err("Slave address not set\n");
-        return -EINVAL;
-    }
-
-    uint8_t kbuf[MAX_BUF_SIZE]; // stack mem
-
-    if( count > MAX_BUF_SIZE) {
-        pr_err("Failed to copy data size\n");
-        return -EINVAL;
-    }
-
-    if(my_i2c_start() != I2C_ERR_NONE) {
-        return -EIO; // I/O error
-    }
-
-    // write address + read bit
-    if(my_i2c_write_byte((sess->slave_addr << 1) | 1) != I2C_ERR_NONE) {
-        my_i2c_stop();
-        return -EIO;
-    }
-
-    // ACK check
-    if(my_i2c_ack() != I2C_ERR_NONE) {
-        my_i2c_stop();
-        return -EIO; // I/O error
-    }
-
-    for (int i = 0; i < count; ++i) {
-        int is_not_last = (i < count - 1);
-        if (my_i2c_read_byte(&kbuf[i], is_not_last) != I2C_ERR_NONE) {
-            my_i2c_stop();
-            return -EIO;
-        }
-    }
-
-    if(my_i2c_stop() != I2C_ERR_NONE) {
-        return -EIO;
-    }
-
-    if (copy_to_user(buf, kbuf, count)) {
-        return -EFAULT;
-    }
-
-    return count;
-}
-
-static ssize_t my_i2c_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos) {
-    pr_info("write called\n");
-
-
-    uint8_t kbuf[MAX_BUF_SIZE]; // stack mem
-
-    // max 길이 초과
-    if (count > MAX_BUF_SIZE) {
-        pr_err("Failed to copy data size\n");
-        return -EINVAL;
-    }
+static void my_i2c_remove(struct platform_device *pdev) {
+    struct my_i2c_data *data = platform_get_drvdata(pdev);
     
-    // user space data(buf)를 kernel spcae data(kbuf)로 복사
-    if (copy_from_user(kbuf, buf, count)) {
-        pr_err("Failed to copy data from user\n");
-        return -EFAULT;
-    }
-
-    if(my_i2c_start() != I2C_ERR_NONE) {
-        return -EIO;
-    }
-
-    pr_info("I2C data: ");
-    for (int i = 0; i < count; ++i) {
-        pr_cont("%02X ", kbuf[i]);          // 16진수(2) 한 줄로 이어서 출력
-
-        if(my_i2c_write_byte(kbuf[i]) != I2C_ERR_NONE) {
-            my_i2c_stop();
-            return -EIO;
-        }
-
-        if(my_i2c_ack() != I2C_ERR_NONE) {
-            my_i2c_stop();
-            return -EIO;
-        }
-
-    }
-    pr_cont("\n");
+    pr_info("my_i2c_remove\n");
     
-    if(my_i2c_stop() != I2C_ERR_NONE) {
-        return -EIO;
-    }
+    if (data) {
 
-    return count;
+        data->ready = 0;
+
+        g_my_i2c_data = NULL;
+
+    }
 }
 
-// file_operations 구조체
-static const struct file_operations my_i2c_fops = {
-    .owner = THIS_MODULE,
-    .open = my_i2c_open,
-    .release = my_i2c_release,
-    .read = my_i2c_read,
-    .write = my_i2c_write,
+
+
+/* Device Tree 매칭 테이블 */
+static const struct of_device_id my_i2c_of_match[] = {
+    { .compatible = "chan,my-i2c", }, // DTS의 compatible 문자열과 일치해야함
+    { }
+};
+MODULE_DEVICE_TABLE(of, my_i2c_of_match);
+
+// platfomr driver 구조체
+static struct platform_driver my_i2c_driver = {
+    .probe = my_i2c_probe,
+    .remove = my_i2c_remove,
+    .driver = {
+        .name = DEVICE_NAME,
+        .of_match_table = my_i2c_of_match,
+    },
 };
 
-// myi2c module init
 static int __init my_i2c_init(void) {
-    int ret = 0;
-
-    pr_info("driver init...\n");
-
-    // GPIO 핀 유효성 검사
-    if (!gpio_is_valid(I2C_SDA_GPIO) || !gpio_is_valid(I2C_SCL_GPIO)) {
-        pr_err("Invalid GPIO pins\n");
-        return -EINVAL;
-    }
-
-    // GPIO 핀 Request ( Kernel에 pin 사용 요청)
-    // 출력모드, 초기값 high ( pull up )
-    ret = gpio_request_one(I2C_SDA_GPIO, GPIOF_OUT_INIT_HIGH, "i2c_sda");
-    if (ret < 0) {
-        pr_err("Failed to request SDA GPIO %d\n", I2C_SDA_GPIO);
-        return ret;
-    }
-
-    ret = gpio_request_one(I2C_SCL_GPIO, GPIOF_OUT_INIT_HIGH, "i2c_scl");
-    if (ret < 0) {
-        pr_err("Failed to request SCL GPIO %d\n", I2C_SCL_GPIO);
-
-        gpio_free(I2C_SDA_GPIO); // request된 sda는 해제
-        return ret;
-    }
-
-    // Character Device 등록 - device 번호 할당
-    ret = alloc_chrdev_region(&my_i2c_dev_num, 0, 1, DEVICE_NAME);
-    if (ret < 0) {
-        pr_err("Failed to allocate char device\n");
-        gpio_free(I2C_SCL_GPIO);
-        gpio_free(I2C_SDA_GPIO);
-        return ret;
-    }
-
-    // 디바이스 커널에 등록
-    cdev_init(&my_i2c_cdev, &my_i2c_fops);
-    my_i2c_cdev.owner = THIS_MODULE;
-
-    ret = cdev_add(&my_i2c_cdev, my_i2c_dev_num, 1);
-    if (ret < 0) {
-        pr_err("Failed to add char device\n");
-        unregister_chrdev_region(my_i2c_dev_num, 1); // 장치 번호 해제
-        gpio_free(I2C_SCL_GPIO);
-        gpio_free(I2C_SDA_GPIO);
-        return ret;
-    }
-
-    // 디바이스의 클래스를 sysfs에 등록 sys/class... (관리 목적)
-    // 디바이스가 어떤 그룹에 속하는가
-    my_i2c_class = class_create("my_i2c_class");
-    if (IS_ERR(my_i2c_class)) {
-        pr_err("Failed to create device class\n");
-        ret = PTR_ERR(my_i2c_class);
-        cdev_del(&my_i2c_cdev); // cdev 삭제
-        unregister_chrdev_region(my_i2c_dev_num, 1);
-        gpio_free(I2C_SCL_GPIO);
-        gpio_free(I2C_SDA_GPIO);
-        return ret;
-    }
-
-    // device file 생성 ( /dev...)
-    if (device_create(my_i2c_class, NULL, my_i2c_dev_num, NULL, "my_i2c_dev") == NULL) {
-        pr_err("Failed to create device file\n");
-        ret = -ENOMEM;
-        class_destroy(my_i2c_class); // 클래스 삭제
-        cdev_del(&my_i2c_cdev);
-        unregister_chrdev_region(my_i2c_dev_num, 1);
-        gpio_free(I2C_SCL_GPIO);
-        gpio_free(I2C_SDA_GPIO);
-        return ret;
-    }
-
-    my_i2c_state = I2C_STATE_IDLE;
-
-    pr_info("driver loaded successfully (Major: %d, Minor: %d)\n", MAJOR(my_i2c_dev_num), MINOR(my_i2c_dev_num));
-    return 0;
+    pr_info("driver init\n");
+    return platform_driver_register(&my_i2c_driver);
 }
 
-// myi2c module exit
 static void __exit my_i2c_exit(void) {
-    pr_info("driver exit...\n");
-
-    device_destroy(my_i2c_class, my_i2c_dev_num);
-    class_destroy(my_i2c_class);
-    cdev_del(&my_i2c_cdev);
-    unregister_chrdev_region(my_i2c_dev_num, 1);
-    gpio_free(I2C_SCL_GPIO);
-    gpio_free(I2C_SDA_GPIO);
-
-    pr_info("driver exit successfully\n");
-
+    pr_info("driver exit\n");
+    platform_driver_unregister(&my_i2c_driver);
 }
 
 module_init(my_i2c_init);
@@ -471,5 +628,12 @@ module_exit(my_i2c_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Chan");
-MODULE_DESCRIPTION("MY I2C Character Device Driver");
-MODULE_VERSION("0.1");
+MODULE_DESCRIPTION("MY I2C Platform Device Driver");
+
+// Exported functions
+EXPORT_SYMBOL(my_i2c_debug);
+EXPORT_SYMBOL(my_i2c_scan);
+EXPORT_SYMBOL(my_i2c_read_bytes);
+EXPORT_SYMBOL(my_i2c_write_bytes);
+EXPORT_SYMBOL(my_i2c_write_reg);
+EXPORT_SYMBOL(my_i2c_read_reg);

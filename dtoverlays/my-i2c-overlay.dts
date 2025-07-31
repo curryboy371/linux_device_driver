@@ -1,0 +1,32 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711"; // 라즈베리 파이 4 호환
+
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            my_i2c_overlay: my-i2c {
+                compatible = "chan,my-i2c"; 
+                status = "okay";
+                
+                // devm_gpiod_get으로 찾을 gpio name
+                myi2c-sda-gpios = <&gpio 20 0>; // GPIO 20 SDA
+                myi2c-scl-gpios = <&gpio 21 0>; // GPIO 21 SCL
+            };
+        };
+    };
+    
+    // 이 fragment는 GPIO 핀 자체의 설정을 위한 것입니다 (풀업/다운, 기능).
+    fragment@1 {
+        target = <&gpio>;
+        __overlay__ {
+            my_i2c_pins: my_i2c_pins {
+                brcm,pins = <20 21>; // 사용하는 모든 GPIO 핀 번호를 여기에 포함
+                brcm,function = <0>; /* GPIO_IN (입력) */
+                brcm,pull = <2>; /* GPIO_PULLUP (풀업) */
+            };
+        };
+    };
+};

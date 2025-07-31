@@ -3,18 +3,6 @@
 
 #include <linux/types.h>
 
-
-
-
-
-// TODO temp pin
-#define I2C_SDA_GPIO    10
-#define I2C_SCL_GPIO    11
-
-#define MAX_BUF_SIZE 32
-
-
-
 #define HIGH 1
 #define LOW  0
 
@@ -31,6 +19,7 @@ typedef enum {
     I2C_STATE_SEND_DATA,    // 데이터 전송 중
     I2C_STATE_RECV_DATA,    // 데이터 수신 중
     I2C_STATE_ACK_CHECK,    // ACK 확인 중
+    I2C_STATE_MASTER_ACK,   // 마스터 ACK 전송 중
     I2C_STATE_STOP,         // STOP 조건 발생 중
     I2C_STATE_RESTART       // Repeated START 조건
 } i2c_state_t;
@@ -45,46 +34,39 @@ typedef enum {
     I2C_ERR_START_CONDITION,      // START 조건 실패
     I2C_ERR_STOP_CONDITION,       // STOP 조건 실패
     I2C_ERR_LINE_STUCK,           // SDA 또는 SCL이 stuck됨
+    I2C_ERR_NOT_READY,           // 준비되지 않음
     I2C_ERR_UNKNOWN               // 알 수 없는 오류
 } i2c_error_t;
 
-// I2C I/O Control 명령어 정의
 typedef enum {
-    I2C_CMD_NONE = 0,
+    I2C_DELAY_START_HOLD,       // START condition hold time
+    I2C_DELAY_SCL_LOW_HOLD,     // SCL LOW hold time
+    I2C_DELAY_SCL_HIGH_HOLD,    // SCL HIGH hold time
+    I2C_DELAY_STOP_SETUP,       // STOP condition setup time
+    I2C_DELAY_SDA_HOLD,         // SDA data hold time
+    I2C_DELAY_RESTART_COND,     // Restart condition bus free
+    I2C_DELAY_ACK_TIMEOUT,      // ACK polling loop delay
+    I2C_DELAY_TEMP,             // Temp delay (1ms)
 
-    // 슬레이브 주소 설정
-    I2C_CMD_SET_SLAVE_ADDR,      // arg: uint8_t
+    I2C_DELAY_COUNT             // 배열 크기 확인용
+} i2c_delay_t;
 
-    // 읽기/쓰기 바이트 수 설정
-    I2C_CMD_SET_READ_LEN,        // arg: uint8_t
-    I2C_CMD_SET_WRITE_LEN,       // arg: uint8_t
+// my_i2c driver scan
+i2c_error_t my_i2c_scan(uint8_t slave_addr);
 
-    // I2C 통신 실행
-    I2C_CMD_EXEC_WRITE,          // 내부에서 START + 슬레이브주소 + 데이터 + STOP
-    I2C_CMD_EXEC_READ,           // 내부에서 START + 슬레이브주소(R) + 읽기 + STOP
+// slave 주소에서 여러 바이트 읽기
+i2c_error_t my_i2c_read_bytes(uint8_t slave_addr, uint8_t *data, size_t len);
 
-    // 통신 상태 확인
-    I2C_CMD_GET_STATUS,          // arg: int __user *
+// slave 주소에 여러 바이트 쓰기
+i2c_error_t my_i2c_write_bytes(uint8_t addr, const uint8_t *data, size_t len);
 
-    // 디버깅용
-    I2C_CMD_RESET_BUS,           // 버스 상태 초기화용 (optional)
+// 레지스터 주소에 여러 바이트 쓰기
+i2c_error_t my_i2c_write_reg(uint8_t slave_addr, uint8_t reg, const uint8_t *data, size_t len);
 
-} i2c_cmd_t;
+// 레지스터 주소에서 여러 바이트 읽기
+i2c_error_t my_i2c_read_reg(uint8_t slave_addr, uint8_t reg, uint8_t *data, size_t len);
 
-// file private data
-typedef struct my_i2c_session {
-    uint8_t slave_addr;
-
-} my_i2c_session_t;
-
-
-
-i2c_error_t my_i2c_master_ack(int ack);
-i2c_error_t my_i2c_start(void);
-i2c_error_t my_i2c_stop(void);
-i2c_error_t my_i2c_ack(void);
-i2c_error_t my_i2c_read_byte(uint8_t *byte, int ack);
-i2c_error_t my_i2c_write_byte(uint8_t data);    
-
+// debug
+void my_i2c_debug(void);
 
 #endif // MY_I2C_H

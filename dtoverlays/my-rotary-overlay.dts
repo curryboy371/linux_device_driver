@@ -7,9 +7,9 @@
     fragment@0 {
         target-path = "/";
         __overlay__ {
-            rotary_encoder: rotary-encoder {
+            rotary_overlay: rotary-overlay {
                 // *** 1. 당신의 커스텀 드라이버에 매칭되는 compatible 문자열 ***
-                compatible = "chan,rotary-encoder"; 
+                compatible = "chan,rotary-overlay"; 
                 status = "okay";
                 
                 // *** 2. 당신의 드라이버가 devm_gpiod_get으로 찾을 이름들 ***
@@ -20,8 +20,8 @@
                 // (선택 사항) 아래 속성들은 당신의 드라이버에서 사용하지 않으므로, 
                 // 혼동을 피하기 위해 DTS에서 제거하는 것을 권장합니다.
                 // linux,axis = <0>;
-                // rotary-encoder,encoding = "gray";
-                // rotary-encoder,steps = <24>;
+                // rotary-overlay,encoding = "gray";
+                // rotary-overlay,steps = <24>;
             };
         };
     };

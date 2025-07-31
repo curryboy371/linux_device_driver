@@ -14,6 +14,9 @@
 
 #include <linux/kthread.h>
 
+#define DEVICE_NAME "rotary"
+
+
 #define COUNT_MIN 0
 #define COUNT_MAX 15
 #define DEBOUNCE_DELAY_MS 1 // rotary 디바운스 지연 시간 (밀리초)
@@ -435,7 +438,7 @@ static void rotary_remove(struct platform_device *pdev) {
 
 /* Device Tree 매칭 테이블 */
 static const struct of_device_id rotary_of_match[] = {
-    { .compatible = "chan,rotary-encoder", }, // DTS의 compatible 문자열과 일치해야함
+    { .compatible = "chan,rotary-overlay", }, // DTS의 compatible 문자열과 일치해야함
     { }
 };
 MODULE_DEVICE_TABLE(of, rotary_of_match);
@@ -447,7 +450,7 @@ static struct platform_driver rotary_driver = {
     .probe = rotary_probe,
     .remove = rotary_remove,
     .driver = {
-        .name = "myrotary-encoder", // dmesg에서 이 이름으로 드라이버를 식별할 수 있습니다.
+        .name = DEVICE_NAME, // dmesg에서 이 이름으로 드라이버를 식별할 수 있습니다.
         .of_match_table = rotary_of_match,
     },
 };

@@ -6,8 +6,14 @@ obj-m := my_i2c_sample.o
 KDIR := $(HOME)/project/linux
 PWD  := $(shell pwd)
 
+
+
 # myi2c 헤더 파일 경로
 ccflags-y += -I$(src)/../myi2c
+
+# i2c 심볼을 찾기 위해 Module.symvers 참조
+KBUILD_EXTRA_SYMBOLS := /home/pi/linux_device_driver/myi2c/Module.symvers
+
 
 # 기본값: x86_64
 ARCH ?= x86_64
