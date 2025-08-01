@@ -83,12 +83,13 @@ static void lcd_init_sequence(void) {
     pr_debug("lcd_init_sequence\n");
 
     my_i2c_debug();
-    
+
     // LCD 초기화 시퀀스 (4비트 모드)
 
     // power on 후 40ms
     msleep(100);
 
+    my_i2c_lock();
     // 3번 8bit mode 상위비트만
     lcd_send_raw4bit(LCD_CMD_FUNCTION_SET_8BIT);
     msleep(5);
@@ -115,6 +116,8 @@ static void lcd_init_sequence(void) {
 
     lcd_move_cursor(0, 0);
     
+    my_i2c_unlock();
+
     
 }
 
@@ -224,14 +227,16 @@ static ssize_t lcd1602_write(struct file *file, const char __user *buffer, size_
     ret = max_len;
 
     // clear
+    my_i2c_lock();
     lcd_send_command(LCD_CMD_CLEAR_DISPLAY);
+    my_i2c_unlock();
+
     msleep(2);
 
+    my_i2c_lock();
     lcd_move_cursor(0, 0);
 
-
     pr_info("lcd write  : ");
-
     for (i = 0; i < max_len && row < 2; i++) {
         pr_cont("%c", kbuf[i]);
 
@@ -254,6 +259,8 @@ static ssize_t lcd1602_write(struct file *file, const char __user *buffer, size_
         }
         msleep(1);
     }
+    my_i2c_unlock();
+
 
     pr_cont("\n");
 
@@ -281,7 +288,6 @@ static int __init lcd1602_init(void)
 
     ret = alloc_chrdev_region(&dev_num, 0, 1, DEV_NAME);
     if (ret < 0) {
-        my_i2c_unregister_device(LCD_ADDR);
         return ret;
     }
 
@@ -292,8 +298,10 @@ static int __init lcd1602_init(void)
     device_create(lcd1602_class, NULL, dev_num, NULL, DEV_NAME);
 
 
+    my_i2c_lock();
     ret = my_i2c_register_device(LCD_ADDR, I2C_DEV_LCD1602);
     if(ret != I2C_ERR_NONE) {
+        my_i2c_unlock();
         pr_err("Failed to register device on i2c bus: %d\n", ret);
         device_destroy(lcd1602_class, dev_num);
         class_destroy(lcd1602_class);
@@ -304,14 +312,18 @@ static int __init lcd1602_init(void)
 
     ret = my_i2c_ping(LCD_ADDR);
     if(ret != I2C_ERR_NONE) {
-        pr_err("No device found at address 0x%02X: %d\n", LCD_ADDR, ret);
         my_i2c_unregister_device(LCD_ADDR);
+        my_i2c_unlock();
+        pr_err("No device found at address 0x%02X: %d\n", LCD_ADDR, ret);
         device_destroy(lcd1602_class, dev_num);
         class_destroy(lcd1602_class);
         cdev_del(&lcd1602_cdev);
         unregister_chrdev_region(dev_num, 1);
         return -EIO;
     }
+
+    my_i2c_unlock();
+
 
 
     lcd_init_sequence();
@@ -325,7 +337,10 @@ static void __exit lcd1602_exit(void)
 {
     pr_debug("exit\n");
 
+    my_i2c_lock();
     my_i2c_unregister_device(LCD_ADDR);
+    my_i2c_unlock();
+
 
     device_destroy(lcd1602_class, dev_num);
     class_destroy(lcd1602_class);

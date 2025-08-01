@@ -113,7 +113,11 @@ i2c_error_t my_i2c_write_reg_bytes(uint8_t slave_addr, uint8_t reg, const uint8_
 // 레지스터 주소에서 여러 바이트 읽기
 i2c_error_t my_i2c_read_reg_bytes(uint8_t slave_addr, uint8_t reg, uint8_t *out_data, size_t len);
 
+void my_i2c_lock(void);
+void my_i2c_unlock(void);
+
 // debug
 void my_i2c_debug(void);
+
 
 #endif // MY_I2C_H

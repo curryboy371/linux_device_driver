@@ -106,7 +106,6 @@ i2c_error_t my_i2c_register_device(uint8_t slave_addr, i2c_device_type_t type) {
         return I2C_ERR_NOT_READY;
     }
 
-    mutex_lock(&g_my_i2c_data->lock);
 
     g_my_i2c_data->type = type;
 
@@ -121,7 +120,6 @@ i2c_error_t my_i2c_register_device(uint8_t slave_addr, i2c_device_type_t type) {
     // 이미 등록된 주소인지 확인
     for (int i = 0; i < MAX_I2C_SLAVES; ++i) {
         if (registered_addrs[i] == slave_addr) {
-            mutex_unlock(&g_my_i2c_data->lock);
             pr_err("Device 0x%02X already registered.\n", slave_addr);
             return I2C_ERR_DUPLICATE;
         }
@@ -132,13 +130,11 @@ i2c_error_t my_i2c_register_device(uint8_t slave_addr, i2c_device_type_t type) {
         if (registered_addrs[i] == 0x00) {
             registered_addrs[i] = slave_addr;
             slave_count++;
-            mutex_unlock(&g_my_i2c_data->lock);
             pr_info("Registered I2C device at address 0x%02X\n", slave_addr);
             return I2C_ERR_NONE;
         }
     }
 
-    mutex_unlock(&g_my_i2c_data->lock);
     pr_err("No space to register more I2C devices slave num:%d\n", slave_count);
     return I2C_ERR_OVERFLOW;
 }
@@ -151,20 +147,15 @@ i2c_error_t my_i2c_unregister_device(uint8_t slave_addr) {
         return I2C_ERR_NOT_READY;
     }
 
-    
-    mutex_lock(&g_my_i2c_data->lock);
 
     for (int i = 0; i < MAX_I2C_SLAVES; ++i) {
         if (registered_addrs[i] == slave_addr) {
             registered_addrs[i] = 0x00;
             slave_count--;
             pr_info("Unregistered I2C device at address 0x%02X\n", slave_addr);
-            mutex_unlock(&g_my_i2c_data->lock);
             return I2C_ERR_NONE;
         }
     }
-
-    mutex_unlock(&g_my_i2c_data->lock);
 
     pr_warn("Device 0x%02X was not registered.\n", slave_addr);
     return I2C_ERR_INVALID_ARG;
@@ -202,12 +193,12 @@ i2c_error_t my_i2c_ping(uint8_t slave_addr) {
     // WRITE address only, expect ACK
     err = my_i2c_write(g_my_i2c_data, I2C_ADDR_WRITE(slave_addr));
     if (err == I2C_ERR_NONE) {
-        pr_info("Found device at 0x%02X\n", slave_addr);
         my_i2c_stop(g_my_i2c_data);
+        pr_info("Found device at 0x%02X\n", slave_addr);
     } 
     else {
-        pr_err("No ACK from device at 0x%02X (err=%d)\n", slave_addr, err);
         my_i2c_stop(g_my_i2c_data);
+        pr_err("No ACK from device at 0x%02X (err=%d)\n", slave_addr, err);
         return err;
     }
 
@@ -492,7 +483,6 @@ static i2c_error_t my_i2c_start(struct my_i2c_data *data) {
     }
 
 
-    mutex_lock(&data->lock);
 
     // check
     // SDA/SCL 상태 및 방향 체크
@@ -525,7 +515,6 @@ static i2c_error_t my_i2c_start(struct my_i2c_data *data) {
     gpiod_direction_output(data->scl_desc, LOW);
     udelay(i2c_delays_us[data->type][I2C_DELAY_SCL_LOW_HOLD]);
 
-    mutex_unlock(&data->lock);
 
     return I2C_ERR_NONE;
 }
@@ -536,7 +525,6 @@ static i2c_error_t my_i2c_restart(struct my_i2c_data *data) {
         return I2C_ERR_NOT_READY;
     }
 
-    mutex_lock(&data->lock);
 
     data->state = I2C_STATE_RESTART;
 
@@ -554,7 +542,6 @@ static i2c_error_t my_i2c_restart(struct my_i2c_data *data) {
     gpiod_direction_output(data->scl_desc, LOW);
     udelay(i2c_delays_us[data->type][I2C_DELAY_SCL_LOW_HOLD]);
 
-    mutex_unlock(&data->lock);
 
     return I2C_ERR_NONE;
 }
@@ -566,7 +553,6 @@ static i2c_error_t my_i2c_stop(struct my_i2c_data *data) {
         return I2C_ERR_NOT_READY;
     }
 
-    mutex_lock(&data->lock);
 
     data->state = I2C_STATE_STOP;
 
@@ -595,7 +581,6 @@ static i2c_error_t my_i2c_stop(struct my_i2c_data *data) {
                 scl_val, scl_in ? "input" : "output");
     }
 
-    mutex_unlock(&data->lock);
 
     return I2C_ERR_NONE;
 }
@@ -610,7 +595,6 @@ i2c_error_t my_i2c_ack(struct my_i2c_data *data) {
         return I2C_ERR_NOT_READY;
     }
 
-    mutex_lock(&data->lock);
     data->state = I2C_STATE_ACK_CHECK;
 
     // scl low로 들어옴
@@ -638,7 +622,6 @@ i2c_error_t my_i2c_ack(struct my_i2c_data *data) {
     gpiod_direction_output(data->scl_desc, LOW);
     udelay(i2c_delays_us[data->type][I2C_DELAY_SCL_LOW_HOLD]);
 
-    mutex_unlock(&data->lock);
 
     if(!ack_received) {
         pr_err("ACK not received\n");
@@ -655,7 +638,6 @@ i2c_error_t my_i2c_master_ack(struct my_i2c_data *data, int ack) {
         return I2C_ERR_NOT_READY;
     }
 
-    mutex_lock(&data->lock);
 
     data->state = I2C_STATE_MASTER_ACK;
 
@@ -677,7 +659,6 @@ i2c_error_t my_i2c_master_ack(struct my_i2c_data *data, int ack) {
     // SDA 해제
     gpiod_direction_input(data->sda_desc);
 
-    mutex_unlock(&data->lock);
     return I2C_ERR_NONE;
 
 }
@@ -689,7 +670,6 @@ static i2c_error_t my_i2c_write(struct my_i2c_data *data, uint8_t byte) {
         return I2C_ERR_NOT_READY;
     }
 
-    mutex_lock(&data->lock);
 
     data->state = I2C_STATE_SEND_DATA;
 
@@ -741,16 +721,8 @@ static i2c_error_t my_i2c_write(struct my_i2c_data *data, uint8_t byte) {
         // udelay(i2c_delays_us[data->type][I2C_DELAY_SCL_LOW_HOLD]);
     }
 
-    mutex_unlock(&data->lock);
-
     // // ACK check
     return my_i2c_ack(data);
-
-    // if ((ret = my_i2c_ack(data)) != I2C_ERR_NONE) {
-    //     return ret;
-    // }
-
-    // return I2C_ERR_NONE;
 }
 
 static i2c_error_t my_i2c_read(struct my_i2c_data *data, uint8_t *byte, int send_ack) {
@@ -761,8 +733,6 @@ static i2c_error_t my_i2c_read(struct my_i2c_data *data, uint8_t *byte, int send
     if (!data->ready) {
         return I2C_ERR_NOT_READY;
     }
-
-    mutex_lock(&data->lock);
 
     // scl이 low로 들어옴 ( ack에서 low)
 
@@ -788,7 +758,6 @@ static i2c_error_t my_i2c_read(struct my_i2c_data *data, uint8_t *byte, int send
         udelay(i2c_delays_us[data->type][I2C_DELAY_SCL_LOW_HOLD]);
     }
 
-    mutex_unlock(&data->lock);
 
     // Master ACK/NACK
     if ((ret = my_i2c_master_ack(data, send_ack)) != I2C_ERR_NONE) {
@@ -799,6 +768,21 @@ static i2c_error_t my_i2c_read(struct my_i2c_data *data, uint8_t *byte, int send
 
     return ret;
 }
+
+void my_i2c_lock(void) {
+
+    if(g_my_i2c_data) {
+        mutex_lock(&g_my_i2c_data->lock);
+    }
+}
+
+void my_i2c_unlock(void) {
+    if(g_my_i2c_data) {
+        mutex_unlock(&g_my_i2c_data->lock);
+    }
+}
+
+
 
 /* --- 플랫폼 드라이버 등록 --- */
 static int my_i2c_probe(struct platform_device *pdev) {
@@ -903,6 +887,9 @@ EXPORT_SYMBOL(my_i2c_register_device);
 EXPORT_SYMBOL(my_i2c_unregister_device);
 EXPORT_SYMBOL(my_i2c_debug);
 EXPORT_SYMBOL(my_i2c_ping);
+
+EXPORT_SYMBOL(my_i2c_lock);
+EXPORT_SYMBOL(my_i2c_unlock);
 
 
 EXPORT_SYMBOL(my_i2c_read_byte);

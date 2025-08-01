@@ -128,7 +128,9 @@ static ssize_t temperature_show(struct device *dev, struct device_attribute *att
     mutex_lock(&bmp_data->lock);
 
     // 온도 측정
+    my_i2c_lock();
     err = bmp180_read_temperature(bmp_data, &temp_raw);
+    my_i2c_unlock();
 
     mutex_unlock(&bmp_data->lock);
 
@@ -150,10 +152,12 @@ static ssize_t pressure_show(struct device *dev, struct device_attribute *attr, 
     mutex_lock(&bmp_data->lock);
 
     // 압력 계산을 위한 온도 측정
+    my_i2c_lock();
     err = bmp180_read_temperature(bmp_data, &temp_raw);
     if (err == I2C_ERR_NONE) {
         err = bmp180_read_pressure(bmp_data, &pressure_raw);
     }
+    my_i2c_unlock();
 
     mutex_unlock(&bmp_data->lock);
 
@@ -209,6 +213,7 @@ static i2c_error_t bmp180_read_calib(struct bmp180_data *data)
     // slave 주소에서 calib start reg을 22byte만큼 read
     err = my_i2c_read_reg_bytes(data->slave_addr, CALIB_DATA_START, raw, sizeof(raw));
     if (err != I2C_ERR_NONE) {
+        my_i2c_unlock();
         return err;
     }
 
@@ -402,24 +407,30 @@ static int __init bmp180_raw_init(void)
     bmp_data->oss = 0;
     mutex_init(&bmp_data->lock);
 
+    my_i2c_lock();
     err = my_i2c_register_device(bmp_data->slave_addr, I2C_DEV_GENERIC);
     if(err != I2C_ERR_NONE) {
+        my_i2c_unlock();
+        kfree(bmp_data);
+        device_destroy(bmp_class, 0);
+        class_destroy(bmp_class);
         pr_err("Failed to register device on i2c bus: %d\n", err);
+        return -EIO;
+    }
+
+    err = my_i2c_ping(bmp_data->slave_addr);
+    if(err != I2C_ERR_NONE) {
+        my_i2c_unregister_device(DEVICE_ADDR);
+        my_i2c_unlock();
+        pr_err("No device found at address 0x%02X: %d\n", bmp_data->slave_addr, err);
         kfree(bmp_data);
         device_destroy(bmp_class, 0);
         class_destroy(bmp_class);
         return -EIO;
     }
 
-    err = my_i2c_ping(bmp_data->slave_addr);
-    if(err != I2C_ERR_NONE) {
-        pr_err("No device found at address 0x%02X: %d\n", bmp_data->slave_addr, err);
-        my_i2c_unregister_device(DEVICE_ADDR);
-        kfree(bmp_data);
-        device_destroy(bmp_class, 0);
-        class_destroy(bmp_class);
-        return -EIO;
-    }
+    my_i2c_unlock();
+
 
     // group으로 한번에 sysfs에 등록
     return sysfs_create_group(&bmp_dev->kobj, &bmp_group);
@@ -429,7 +440,9 @@ static void __exit bmp180_raw_exit(void)
 {
     pr_debug("bmp180 sysfs exit\n");
 
+    my_i2c_lock();
     my_i2c_unregister_device(DEVICE_ADDR);
+    my_i2c_unlock();
 
     if(bmp_data) {
         kfree(bmp_data);
