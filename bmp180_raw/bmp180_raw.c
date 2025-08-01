@@ -1,5 +1,8 @@
 #define pr_fmt(fmt) "[BMP180_RAW] " fmt
 
+// pr_debuf 출력
+#define DEBUG
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
@@ -17,9 +20,15 @@
  
   - i2c_driver 구조체를 사용한 Linux I2C 클라이언트 드라이버
   - 사용자 공간과 sysfs를 통해 직접 값 읽기/쓰기 가능:
-    /sys/class/bmp180/bmp0/temperature
-    /sys/class/bmp180/bmp0/pressure
+    /sys/class/bmp180_raw/bmp180/temperature
+    /sys/class/bmp180_raw/bmp180/pressure
     cat, echo로 직접 측정값 확인 및 설정 가능.
+
+
+    test
+    oos write : echo 2 | sudo tee /sys/class/bmp180_raw/bmp180/pressure
+    temp read : sudo cat /sys/class/bmp180_raw/bmp180/temperature
+    sudo cat /sys/class/bmp180_raw/bmp180/pressure
 
  */
 
@@ -92,17 +101,16 @@ static struct device_attribute dev_attr_pressure = {
     .store = pressure_store,
 };
 
-
 // attribute array 생성
-static struct attribute *bmp180_attrs[] = {
+static struct attribute *bmp_attrs[] = {
     &dev_attr_temperature.attr,
     &dev_attr_pressure.attr,
     NULL,
 };
 
 // grroup화
-static const struct attribute_group bmp180_group = {
-    .attrs = bmp180_attrs,
+static const struct attribute_group bmp_group = {
+    .attrs = bmp_attrs,
 };
 
 
@@ -113,6 +121,9 @@ static const struct attribute_group bmp180_group = {
 static ssize_t temperature_show(struct device *dev, struct device_attribute *attr, char *buf) {
     int temp_raw = 0;
     i2c_error_t err = I2C_ERR_NONE;
+
+    pr_debug("temperature_show\n");
+
 
     mutex_lock(&bmp_data->lock);
 
@@ -133,6 +144,8 @@ static ssize_t pressure_show(struct device *dev, struct device_attribute *attr, 
     int pressure_raw = 0;
     int temp_raw = 0;
     i2c_error_t err;
+
+    pr_debug("pressure_show\n");
 
     mutex_lock(&bmp_data->lock);
 
@@ -155,6 +168,8 @@ static ssize_t pressure_show(struct device *dev, struct device_attribute *attr, 
 static ssize_t pressure_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
     int oss_val;
 
+    pr_debug("pressure_store\n");
+
     if (sscanf(buf, "%d", &oss_val) != 1 || oss_val < 0 || oss_val > 3) {
         return -EINVAL;
     }
@@ -163,7 +178,7 @@ static ssize_t pressure_store(struct device *dev, struct device_attribute *attr,
     bmp_data->oss = oss_val;
     mutex_unlock(&bmp_data->lock);
 
-    pr_info("BMP180 Oversampling Setting (OSS) updated to %d\n", bmp_data->oss);
+    pr_debug("BMP180 Oversampling Setting (OSS) updated to %d\n", bmp_data->oss);
 
     return count;
 }
@@ -178,6 +193,9 @@ static i2c_error_t bmp180_read_calib(struct bmp180_data *data)
         return I2C_ERR_NONE;
     }
 
+    pr_debug("read calib table\n");
+
+
     i2c_error_t err = I2C_ERR_NONE;
 
     uint8_t raw[CALIB_DATA_LENGTH];
@@ -188,12 +206,8 @@ static i2c_error_t bmp180_read_calib(struct bmp180_data *data)
         &data->calib.MB, &data->calib.MC, &data->calib.MD
     };
 
-    err = my_i2c_write_byte(data->slave_addr, CALIB_DATA_START);
-    if (err != I2C_ERR_NONE) {
-        return err;
-    }
-
-    err = my_i2c_read_bytes(data->slave_addr, raw, sizeof(raw));
+    // slave 주소에서 calib start reg을 22byte만큼 read
+    err = my_i2c_read_reg_bytes(data->slave_addr, CALIB_DATA_START, raw, sizeof(raw));
     if (err != I2C_ERR_NONE) {
         return err;
     }
@@ -204,6 +218,8 @@ static i2c_error_t bmp180_read_calib(struct bmp180_data *data)
 
     data->is_calib_read = 1;
 
+    pr_debug("read calib table successpully\n");
+
     return err;
 }
 
@@ -212,6 +228,9 @@ static i2c_error_t bmp180_read_pressure(struct bmp180_data* data, int* out_press
     i2c_error_t err = I2C_ERR_NONE;
     uint8_t rx[3] = {0};
     uint32_t up = 0;
+
+    pr_debug("bmp180_read_pressure\n");
+
 
     err = bmp180_read_calib(data);
     if (err != I2C_ERR_NONE) {
@@ -224,7 +243,7 @@ static i2c_error_t bmp180_read_pressure(struct bmp180_data* data, int* out_press
     uint8_t cmd = PRESSURE | (data->oss << 6);
     uint8_t write_buf[2] = { ctrl, cmd };
 
-    err = my_i2c_write_bytes(data->slave_addr, write_buf, sizeof(write_buf));
+    err = my_i2c_write_bytes(data->slave_addr, write_buf, sizeof(write_buf), 0);
     if (err != I2C_ERR_NONE) {
         pr_err("Failed to write pressure measure command\n");
         return err;
@@ -264,6 +283,9 @@ static i2c_error_t bmp180_read_temperature(struct bmp180_data *data, int *temp_o
     uint8_t rx[2] = {0};
     int32_t ut = 0;
 
+    pr_debug("bmp180_read_temperature\n");
+
+
     err = bmp180_read_calib(data);
     if (err != I2C_ERR_NONE) {
         pr_err("calib table read failed\n");
@@ -272,7 +294,7 @@ static i2c_error_t bmp180_read_temperature(struct bmp180_data *data, int *temp_o
 
     // 온도 측정 명령 전송
     uint8_t cmd[2] = { CTRL_MEAS, TEMP };
-    err = my_i2c_write_bytes(data->slave_addr, cmd, sizeof(cmd));
+    err = my_i2c_write_bytes(data->slave_addr, cmd, sizeof(cmd), 0);
     if (err != I2C_ERR_NONE) {
         pr_err("Failed to write TEMP_CMD\n");
         return err;
@@ -309,11 +331,7 @@ static s32 bmp180_calc_b5(struct bmp180_calib *calib, u16 ut) {
     return x1 + x2;
 }
 
-static struct attribute *bmp_attrs[] = {
-    &dev_attr_temperature.attr,
-    &dev_attr_pressure.attr,
-    NULL,
-};
+
 
 static int bmp180_calc_pressure(struct bmp180_data *data, uint32_t up) {
     s32 b6, x1, x2, x3, b3, p;
@@ -349,14 +367,10 @@ static int bmp180_calc_pressure(struct bmp180_data *data, uint32_t up) {
 }
 
 
-static const struct attribute_group bmp_group = {
-    .attrs = bmp_attrs,
-};
-
 // ----- 모듈 init / exit -----
 static int __init bmp180_raw_init(void)
 {
-    pr_info("bmp180 sysfs init\n");
+    pr_debug("bmp180 sysfs init\n");
 
     i2c_error_t err = I2C_ERR_NONE;
 
@@ -388,7 +402,7 @@ static int __init bmp180_raw_init(void)
     bmp_data->oss = 0;
     mutex_init(&bmp_data->lock);
 
-    err = my_i2c_register_device(bmp_data->slave_addr);
+    err = my_i2c_register_device(bmp_data->slave_addr, I2C_DEV_GENERIC);
     if(err != I2C_ERR_NONE) {
         pr_err("Failed to register device on i2c bus: %d\n", err);
         kfree(bmp_data);
@@ -400,13 +414,12 @@ static int __init bmp180_raw_init(void)
     err = my_i2c_ping(bmp_data->slave_addr);
     if(err != I2C_ERR_NONE) {
         pr_err("No device found at address 0x%02X: %d\n", bmp_data->slave_addr, err);
+        my_i2c_unregister_device(DEVICE_ADDR);
         kfree(bmp_data);
         device_destroy(bmp_class, 0);
         class_destroy(bmp_class);
         return -EIO;
     }
-
-    my_i2c_init_gpio();
 
     // group으로 한번에 sysfs에 등록
     return sysfs_create_group(&bmp_dev->kobj, &bmp_group);
@@ -414,7 +427,7 @@ static int __init bmp180_raw_init(void)
 
 static void __exit bmp180_raw_exit(void)
 {
-    pr_info("bmp180 sysfs exit\n");
+    pr_debug("bmp180 sysfs exit\n");
 
     my_i2c_unregister_device(DEVICE_ADDR);
 

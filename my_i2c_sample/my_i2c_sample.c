@@ -211,8 +211,6 @@ static int my_i2c_sample_open(struct inode *inode, struct file *file) {
 
     pr_info("my_i2c_sample open called\n");
 
-    my_i2c_init_gpio();
-    my_i2c_debug();
 
     struct my_i2c_session *sess;
 

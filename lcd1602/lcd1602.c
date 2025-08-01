@@ -1,3 +1,8 @@
+#define pr_fmt(fmt) "[LCD1602] " fmt
+
+// pr_debuf 출력
+#define DEBUG
+
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs.h>
@@ -62,8 +67,11 @@ static void lcd_write_nibble(uint8_t nibble, uint8_t control)
     data[0] = (nibble & 0xF0) | control | LCD_ENABLE;
     data[1] = (nibble & 0xF0) | control;
 
+    pr_debug("data[0]=0x%02X (EN=1)\n", data[0]);
     i2c_master_send(lcd_i2c_client, &data[0], 1);
     udelay(10);
+
+    pr_debug("data[1]=0x%02X (EN=0)\n", data[1]);
     i2c_master_send(lcd_i2c_client, &data[1], 1);
     udelay(WRITE_TERM_US);
 }
@@ -94,6 +102,7 @@ static void lcd_move_cursor(uint8_t row, uint8_t column)
 
 static void lcd_init_sequence(void)
 {
+    pr_debug("lcd_init_sequence\n");
     msleep(50);
     lcd_send_raw4bit(LCD_CMD_FUNCTION_SET_8BIT);
     msleep(5);
@@ -103,6 +112,8 @@ static void lcd_init_sequence(void)
     msleep(1);
     lcd_send_raw4bit(LCD_CMD_FUNCTION_SET_4BIT);
     msleep(1);
+
+    pr_debug("4bit mode\n");
 
     lcd_send_command(LCD_CMD_FUNCTION_SET_2LINE);
     lcd_send_command(LCD_CMD_DISPLAY_ON_CURSOR_OFF);
