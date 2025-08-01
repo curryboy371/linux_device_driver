@@ -5,7 +5,7 @@ CROSS_COMPILE := aarch64-linux-gnu-
 
 # ko 파일 경로 정의
 MYI2C_KO := myi2c/my_i2c.ko
-MYI2C_SAMPLE_KO := my_i2c_sample/my_i2c_sample.ko
+BMP180_RAW_KO := bmp180_raw/bmp180_raw.ko
 ROTARY_KO := rotary/rotary_module.ko
 LEDBAR_KO := ledbar_module/ledbar_module.ko
 
@@ -14,28 +14,28 @@ LEDBAR_KO := ledbar_module/ledbar_module.ko
 # 전체 빌드
 all:
 	$(MAKE) -C myi2c CROSS=1
-	$(MAKE) -C my_i2c_sample CROSS=1
+	$(MAKE) -C bmp180_raw CROSS=1
 	$(MAKE) -C rotary CROSS=1
 	$(MAKE) -C ledbar_module CROSS=1
 
 # 전체 클린
 clean:
 	$(MAKE) -C myi2c clean
-	$(MAKE) -C my_i2c_sample clean
+	$(MAKE) -C bmp180_raw clean
 	$(MAKE) -C rotary clean
 	$(MAKE) -C ledbar_module clean
 
 # 전체 모듈 로드
 load:
 	sudo insmod $(MYI2C_KO)
-	sudo insmod $(MYI2C_SAMPLE_KO)
+	sudo insmod $(BMP180_RAW_KO)
 	sudo insmod $(ROTARY_KO)
 	sudo insmod $(LEDBAR_KO)
 	dmesg | tail -n 20
 
 # 전체 모듈 언로드
 unload:
-	sudo rmmod my_i2c_sample || true
+	sudo rmmod bmp180_raw || true
 	sudo rmmod my_i2c || true
 	sudo rmmod ledbar_module || true
 	sudo rmmod rotary_module || true

@@ -35,6 +35,11 @@ typedef enum {
     I2C_ERR_STOP_CONDITION,       // STOP 조건 실패
     I2C_ERR_LINE_STUCK,           // SDA 또는 SCL이 stuck됨
     I2C_ERR_NOT_READY,           // 준비되지 않음
+
+    I2C_ERR_OVERFLOW,             // 등록 가능 주소 없음
+    I2C_ERR_DUPLICATE,            // 이미 등록된 주소
+    I2C_INAVLID_ADDR,             // 등록되지 않은 주소
+    
     I2C_ERR_UNKNOWN               // 알 수 없는 오류
 } i2c_error_t;
 
@@ -53,20 +58,46 @@ typedef enum {
 
 void my_i2c_init_gpio(void);
 
+// Register a new I2C slave device
+i2c_error_t my_i2c_register_device(uint8_t slave_addr);
+
+// Unregister an I2C slave device
+i2c_error_t my_i2c_unregister_device(uint8_t slave_addr);
+
+
 // my_i2c driver ping
 i2c_error_t my_i2c_ping(uint8_t slave_addr);
 
+
+//// single byte 함수 
+
+// slave 주소에서 바이트 읽기
+i2c_error_t my_i2c_read_byte(uint8_t slave_addr, uint8_t *out_data);
+
+// slave 주소에 바이트 쓰기
+i2c_error_t my_i2c_write_byte(uint8_t addr, const uint8_t data);
+
+// 레지스터 주소에 바이트 쓰기
+i2c_error_t my_i2c_write_reg_byte(uint8_t slave_addr, uint8_t reg, const uint8_t data);
+
+// 레지스터 주소에서 바이트 읽기
+i2c_error_t my_i2c_read_reg_byte(uint8_t slave_addr, uint8_t reg, uint8_t* out_data);
+
+
+
+
+//// multi bytes 함수 
 // slave 주소에서 여러 바이트 읽기
-i2c_error_t my_i2c_read_bytes(uint8_t slave_addr, uint8_t *data, size_t len);
+i2c_error_t my_i2c_read_bytes(uint8_t slave_addr, uint8_t *out_data, size_t len);
 
 // slave 주소에 여러 바이트 쓰기
 i2c_error_t my_i2c_write_bytes(uint8_t addr, const uint8_t *data, size_t len);
 
 // 레지스터 주소에 여러 바이트 쓰기
-i2c_error_t my_i2c_write_reg(uint8_t slave_addr, uint8_t reg, const uint8_t *data, size_t len);
+i2c_error_t my_i2c_write_reg_bytes(uint8_t slave_addr, uint8_t reg, const uint8_t *data, size_t len);
 
 // 레지스터 주소에서 여러 바이트 읽기
-i2c_error_t my_i2c_read_reg(uint8_t slave_addr, uint8_t reg, uint8_t *data, size_t len);
+i2c_error_t my_i2c_read_reg_bytes(uint8_t slave_addr, uint8_t reg, uint8_t *out_data, size_t len);
 
 // debug
 void my_i2c_debug(void);
