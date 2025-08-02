@@ -115,11 +115,36 @@ static void lcd_init_sequence(void) {
     msleep(2);
 
     lcd_move_cursor(0, 0);
-    
-    my_i2c_unlock();
 
-    
+    my_i2c_unlock();
 }
+
+static void lcd_init_message(void) {
+
+    pr_debug("lcd_init_message\n");
+
+    const char* line1 = "LCD1602";
+    const char* line2 = "Initialized!";
+
+
+    my_i2c_lock();
+
+    lcd_send_command(LCD_CMD_CLEAR_DISPLAY);
+
+    lcd_move_cursor(0, 0);
+    for (int i = 0; line1[i] && i < LCD1602_LINE_WIDTH; i++) {
+        lcd_send_data(line1[i]);
+    }
+
+    lcd_move_cursor(1, 0);
+
+    for (int i = 0; line1[i] && i < LCD1602_LINE_WIDTH; i++) {
+        lcd_send_data(line2[i]);
+    }
+
+    my_i2c_unlock();
+}
+
 
 static void lcd_write_nibble(uint8_t nibble, uint8_t control)
 {
@@ -324,9 +349,8 @@ static int __init lcd1602_init(void)
 
     my_i2c_unlock();
 
-
-
     lcd_init_sequence();
+    lcd_init_message();
 
     pr_debug("initialized\n");
 
