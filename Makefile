@@ -1,61 +1,85 @@
+.PHONY: all clean load unload reload push deploy print
+
 # 커널 빌드 경로 및 크로스 컴파일 설정
 KDIR := $(HOME)/project/linux
 ARCH := arm64
 CROSS_COMPILE := aarch64-linux-gnu-
 
-# ko 파일 경로 정의
-MYI2C_KO := myi2c/my_i2c.ko
-BMP180_RAW_KO := bmp180_raw/bmp180_raw.ko
-LCD1602_RAW_KO := lcd1602_raw/lcd1602_raw.ko
+BASE := $(shell pwd)
+I2C_SYMBOLS := $(BASE)/myi2c/Module.symvers
+
+# 대상 장비 정보
+TARGET_IP := pi@192.168.219.106
+TARGET_DIR := /home/pi/linux_device_driver
 
 
-ROTARY_KO := rotary/rotary_module.ko
-LEDBAR_KO := ledbar_module/ledbar_module.ko
+# defualt 1 (raw 빌드)
+raw ?= 1
 
 
-.PHONY: all clean load unload reload
 
 # 전체 빌드
 all:
-	$(MAKE) -C myi2c CROSS=1
-	$(MAKE) -C bmp180_raw CROSS=1
-	$(MAKE) -C lcd1602_raw CROSS=1
+	$(MAKE) -C myi2c \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/myi2c
 
+	$(MAKE) -C bmp180 \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/bmp180 \
+		KBUILD_EXTRA_SYMBOLS=$(I2C_SYMBOLS)
 
-#	$(MAKE) -C rotary CROSS=1
-#	$(MAKE) -C ledbar_module CROSS=1
+	$(MAKE) -C lcd1602 \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/lcd1602 \
+		KBUILD_EXTRA_SYMBOLS=$(I2C_SYMBOLS)
+
 
 # 전체 클린
 clean:
-	$(MAKE) -C myi2c clean
-	$(MAKE) -C bmp180_raw clean
-	$(MAKE) -C lcd1602_raw clean
+	$(MAKE) -C myi2c clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/myi2c
 
+	$(MAKE) -C bmp180 clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/bmp180
 
-	$(MAKE) -C rotary clean
-	$(MAKE) -C ledbar_module clean
+	$(MAKE) -C lcd1602 clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/lcd1602
 
-# 전체 모듈 로드
+# 전체 모듈 로드 (raw 옵션 전달)
 load:
-	sudo insmod $(MYI2C_KO)
-	
-	sudo insmod $(BMP180_RAW_KO)
-	sudo insmod $(LCD1602_RAW_KO)
-
-#	sudo insmod $(ROTARY_KO)
-#	sudo insmod $(LEDBAR_KO)
+	$(MAKE) -C myi2c load
+	$(MAKE) -C bmp180 load raw=$(raw)
+	$(MAKE) -C lcd1602 load raw=$(raw)
 	dmesg | tail -n 20
 
-# 전체 모듈 언로드
+# 전체 모듈 언로드 (raw 옵션 전달)
 unload:
-	sudo rmmod bmp180_raw || true
-	sudo rmmod lcd1602_raw || true
-
-	sudo rmmod my_i2c || true
-
-#	sudo rmmod ledbar_module || true
-#	sudo rmmod rotary_module || true
+	$(MAKE) -C lcd1602 unload raw=$(raw)
+	$(MAKE) -C bmp180 unload raw=$(raw)
+	$(MAKE) -C myi2c unload
 	dmesg | tail -n 20
 
 # 언로드 후 다시 로드
-reload: unload load
+reload:
+	$(MAKE) unload raw=$(raw)
+	$(MAKE) load raw=$(raw)
+
+# 라즈베리 파이 전송
+push:
+	scp -r . $(TARGET_IP):$(TARGET_DIR)
+
+# 빌드 후 전송
+deploy: all push
+
+
+print:
+	@echo "KDIR = $(KDIR)"
+	@echo "BASE = $(BASE)"
+	@echo "I2C_SYMBOLS = $(I2C_SYMBOLS)"
+
+	@echo "TARGET_IP = $(TARGET_IP)"
+	@echo "TARGET_DIR = $(TARGET_DIR)"

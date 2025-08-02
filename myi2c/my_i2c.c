@@ -234,7 +234,7 @@ i2c_error_t my_i2c_read_bytes(uint8_t slave_addr, uint8_t *out_data, size_t len)
 
     i2c_error_t err = I2C_ERR_NONE;
 
-    pr_debug("my_i2c_read_bytes %zu byte(s) from 0x%02X\n", len, slave_addr);
+    //pr_debug("my_i2c_read_bytes %zu byte(s) from 0x%02X\n", len, slave_addr);
 
     if (!g_my_i2c_data || !g_my_i2c_data->ready) {
         pr_err("I2C not ready\n");
@@ -282,7 +282,7 @@ i2c_error_t my_i2c_write_bytes(uint8_t addr, const uint8_t *data, size_t len, in
 
     for (int retry = 0; retry < RETRY_COUNT; ++retry) {
 
-        pr_debug("my_i2c_write_bytes retry(%d) %zu byte(s) to 0x%02X\n", retry, len, addr);
+        //pr_debug("my_i2c_write_bytes retry(%d) %zu byte(s) to 0x%02X\n", retry, len, addr);
 
         if ((err = my_i2c_start(g_my_i2c_data)) != I2C_ERR_NONE) {
             pr_err("START failed\n");
@@ -300,7 +300,7 @@ i2c_error_t my_i2c_write_bytes(uint8_t addr, const uint8_t *data, size_t len, in
         uint8_t success = 1;
         for (size_t i = 0; i < len; ++i) {
 
-            pr_debug("Writing data[%zu] = 0x%02X\n", i, data[i]);
+            //pr_debug("Writing data[%zu] = 0x%02X\n", i, data[i]);
             if ((err = my_i2c_write(g_my_i2c_data, data[i])) != I2C_ERR_NONE) {
                 pr_err("Data byte %zu (0x%02X) NACK\n", i, data[i]);
                 my_i2c_stop(g_my_i2c_data);
@@ -336,7 +336,7 @@ i2c_error_t my_i2c_write_reg_bytes(uint8_t slave_addr, uint8_t reg, const uint8_
 
     i2c_error_t err = I2C_ERR_NONE;
 
-    pr_debug("[my_i2c_write_reg_bytes] %zu byte(s) from 0x%02X\n", len, slave_addr);
+    //pr_debug("[my_i2c_write_reg_bytes] %zu byte(s) from 0x%02X\n", len, slave_addr);
 
 
     if (!g_my_i2c_data || !g_my_i2c_data->ready) {
@@ -391,7 +391,7 @@ i2c_error_t my_i2c_write_reg_bytes(uint8_t slave_addr, uint8_t reg, const uint8_
 i2c_error_t my_i2c_read_reg_bytes(uint8_t slave_addr, uint8_t reg, uint8_t *out_data, size_t len) {
 
     i2c_error_t err;
-    pr_debug("[my_i2c_read_reg_bytes] %zu byte(s) from 0x%02X\n", len, slave_addr);
+    //pr_debug("[my_i2c_read_reg_bytes] %zu byte(s) from 0x%02X\n", len, slave_addr);
 
     if (!g_my_i2c_data || !g_my_i2c_data->ready) {
         pr_err("I2C not ready\n");
@@ -440,7 +440,7 @@ i2c_error_t my_i2c_read_reg_bytes(uint8_t slave_addr, uint8_t reg, uint8_t *out_
             return err;
         }
 
-        pr_debug("[READ_REG] Read[%zu] = 0x%02X\n", i, out_data[i]);
+        //pr_debug("[READ_REG] Read[%zu] = 0x%02X\n", i, out_data[i]);
     }
 
     // stop

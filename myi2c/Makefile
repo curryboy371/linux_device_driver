@@ -1,22 +1,43 @@
+.PHONY: all clean load unload reload print
+
+
 obj-m := my_i2c.o
 
-# make 일반 컴파일
-# make CROSS=1 크로스 컴파일
+# 커널 소스 디렉토리
 
-KDIR := $(HOME)/project/linux
-PWD  := $(shell pwd)
+DRIVER_DIR ?= $(shell pwd)
+KDIR ?= $(HOME)/project/linux
+ARCH ?= arm64
+CROSS_COMPILE ?= aarch64-linux-gnu-
 
-# 기본값: x86_64
-ARCH ?= x86_64
-CROSS_COMPILE ?=
+# 모듈 이름 및 .ko 파일 경로 매크로
+MODULE_NAME := my_i2c
+MODULE_KO := $(MODULE_NAME).ko
 
-ifeq ($(CROSS),1)
-    ARCH := arm64
-    CROSS_COMPILE := aarch64-linux-gnu-
-endif
-
+# 기본 빌드
 all:
-	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules -j12
+	make -C $(KDIR) \
+		M=$(DRIVER_DIR) \
+		ARCH=$(ARCH) \
+		CROSS_COMPILE=$(CROSS_COMPILE) \
+		modules -j12
 
 clean:
-	make -C $(KDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
+	make -C $(KDIR) M=$(DRIVER_DIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
+
+# 로드
+load:
+	sudo insmod $(MODULE_KO) || true
+
+# 언로드
+unload:
+	sudo rmmod $(MODULE_NAME) || true
+
+# 재로드
+reload:
+	$(MAKE) unload
+	$(MAKE) load
+
+print:
+	@echo "KDIR: $(KDIR)"
+	@echo "DRIVER_DIR: $(DRIVER_DIR)"
