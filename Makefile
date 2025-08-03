@@ -40,6 +40,11 @@ all:
 		DRIVER_DIR=$(BASE)/oled \
 		KBUILD_EXTRA_SYMBOLS=$(I2C_SYMBOLS)
 
+	$(MAKE) -C vs1003 \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/vs1003
+
+
 
 # 전체 클린
 clean:
