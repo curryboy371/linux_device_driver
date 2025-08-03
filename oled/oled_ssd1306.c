@@ -34,32 +34,36 @@
 #define BUS_NUM 1
 
 
-#define OLED_CMD  0x00
-#define OLED_DATA 0x40
-#define OLED_LINE_HEIGHT 8
-#define OLED_LINE_COUNT 8
-#define OLED_WIDTH 128
-
 static dev_t dev_num;
 static struct cdev oled_cdev;
 static struct class *oled_class;
 static struct i2c_client *oled_client;
 
+// I2C 1byte Command 전송
 static void oled_send_cmd(uint8_t cmd)
 {
-    uint8_t buf[2] = { OLED_CMD, cmd };
+    uint8_t buf[2] = { SSD1306_CO_CMD_SINGLE, cmd };
 
     i2c_master_send(oled_client, buf, 2);
 }
 
+// I2C GDDRAM에 픽셀 데이터 연속 전송
+// 데이터 길이는 가변적, Stop 조건을 받으면 SSD1306이 데이터 수신을 끝냄
 static void oled_send_data(uint8_t *data, size_t len)
 {
     uint8_t *buf = kmalloc(len + 1, GFP_KERNEL);
     if (!buf) {
+        pr_err("Failed to allocate memory for data buffer\n");
         return;
-     }
+    }
 
-    buf[0] = OLED_DATA;
+    if(!oled_client) {
+        pr_err("oled_client is null\n");
+        kfree(buf);
+        return;
+    }
+
+    buf[0] = SSD1306_CO_DATA_SINGLE;
     memcpy(buf + 1, data, len);
     i2c_master_send(oled_client, buf, len + 1);
     kfree(buf);
@@ -224,26 +228,91 @@ static struct file_operations fops = {
     .release = oled_ssd1306_release
 };
 
+
+// DTS compatible 문자열과 일치하도록 of_device_id 테이블을 추가
+static const struct of_device_id oled_of_match[] = {
+    { .compatible = "i2c-oled,ssd1306", },
+    { }
+};
+MODULE_DEVICE_TABLE(of, oled_of_match);
+
+// 디바이스 트리 없이, 플랫폼 데이터(Platform Data)를 사용
 static const struct i2c_device_id oled_id[] = {
     { DEV_NAME, 0 },
     { }
 };
 MODULE_DEVICE_TABLE(i2c, oled_id);
 
+
 static int oled_ssd1306_probe(struct i2c_client *client)
 {
     pr_debug("oled_ssd1306_probe\n");
 
+    int ret = 0;
     oled_client = client;
-    oled_init_sequence();
+
+    // 문자 디바이스 번호 할당
+    ret = alloc_chrdev_region(&dev_num, 0, 1, DEV_NAME);
+    if (ret < 0) {
+        pr_err("Failed to alloc_chrdev_region\n");
+        return ret;
+    }
+
+    // cdev 구조체 초기화
+    cdev_init(&oled_cdev, &fops);
+
+    // cdev 커널에 등록
+    ret = cdev_add(&oled_cdev, dev_num, 1);
+    if (ret < 0) {
+        pr_err("Failed to cdev_add\n");
+        goto err_cdev_add;
+    }
+
+    // 디바이스 클래스 생성
+    oled_class = class_create(DEV_NAME);
+    if (IS_ERR(oled_class)) {
+        pr_err("Failed to class_create\n");
+        ret = PTR_ERR(oled_class);
+        goto err_class_create;
+    }
+
+    // 5단계: 디바이스 파일 생성
+    if (IS_ERR(device_create(oled_class, NULL, dev_num, NULL, DEV_NAME))) {
+        pr_err("Failed to device_create\n");
+        ret = -ENODEV;
+        goto err_device_create;
+    }
+
+    oled_init_sequence(); // OLED 초기화 시퀀스 실행
+    pr_info("OLED SSD1306 Driver probed successfully\n");
+
     return 0;
+
+
+err_device_create:
+    class_destroy(oled_class);
+err_class_create:
+    cdev_del(&oled_cdev);
+err_cdev_add:
+    unregister_chrdev_region(dev_num, 1);
+    return ret;
 }
 
-static void oled_ssd1306_remove(struct i2c_client *client) {}
+static void oled_ssd1306_remove(struct i2c_client *client) {
+
+    pr_info("oled_ssd1306_remove is called\n");
+    device_destroy(oled_class, dev_num);
+    class_destroy(oled_class);
+    cdev_del(&oled_cdev);
+    unregister_chrdev_region(dev_num, 1);
+    oled_client = NULL;
+}
 
 static struct i2c_driver oled_driver = {
     .driver = {
         .name = DEV_NAME,
+        .owner = THIS_MODULE,
+        .of_match_table = oled_of_match, // dts 매칭 테이블 추가
     },
     .probe = oled_ssd1306_probe,
     .remove = oled_ssd1306_remove,
@@ -252,49 +321,15 @@ static struct i2c_driver oled_driver = {
 
 static int __init oled_ssd1306_init(void)
 {
-    int ret;
-    struct i2c_adapter *adapter;
-    struct i2c_board_info info = {
-        I2C_BOARD_INFO(DEV_NAME, OLED_ADDR)
-    };
 
-    pr_debug("init OLED SSD1306 driver.\n");
-
-
-    adapter = i2c_get_adapter(BUS_NUM);
-    if (!adapter) {
-        return -ENODEV;
-    }
-
-    oled_client = i2c_new_client_device(adapter, &info);
-    i2c_put_adapter(adapter);
-    if (!oled_client) {
-        return -ENODEV;
-    }
-
-    ret = alloc_chrdev_region(&dev_num, 0, 1, DEV_NAME);
-    if (ret < 0)  {
-        return ret;
-    }
-
-    cdev_init(&oled_cdev, &fops);
-    cdev_add(&oled_cdev, dev_num, 1);
-    oled_class = class_create(DEV_NAME);
-    device_create(oled_class, NULL, dev_num, NULL, DEV_NAME);
-
+    pr_info("init OLED SSD1306 driver.\n");
     return i2c_add_driver(&oled_driver);
 }
 
 static void __exit oled_ssd1306_exit(void)
 {
-    pr_debug("exit OLED SSD1306 driver.\n");
-
-    i2c_unregister_device(oled_client);
+    pr_info("exit OLED SSD1306 driver.\n");
     i2c_del_driver(&oled_driver);
-    device_destroy(oled_class, dev_num);
-    class_destroy(oled_class);
-    cdev_del(&oled_cdev);
-    unregister_chrdev_region(dev_num, 1);
 }
 
 module_init(oled_ssd1306_init);

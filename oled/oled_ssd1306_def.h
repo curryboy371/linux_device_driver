@@ -5,6 +5,18 @@
  * SSD1306 OLED Command Set
  */
 
+#define OLED_LINE_HEIGHT 8
+#define OLED_LINE_COUNT 8
+#define OLED_WIDTH 128
+
+
+ // Control Byte (I2C)
+#define SSD1306_CO_CMD_SINGLE   0x00  // Co=0, D/C#=0 : 명령어 단일 전송
+#define SSD1306_CO_CMD_CONT     0x80  // Co=1, D/C#=0 : 연속 명령어 전송
+#define SSD1306_CO_DATA_SINGLE  0x40  // Co=0, D/C#=1 : 데이터 단일/연속 전송
+#define SSD1306_CO_DATA_CONT    0xC0  // Co=1, D/C#=1 : 연속 데이터 전송 (거의 안 씀)
+
+
 // Fundamental Commands
 #define SSD1306_CMD_DISPLAY_OFF            0xAE  // 디스플레이 OFF
 #define SSD1306_CMD_DISPLAY_ON             0xAF  // 디스플레이 ON
