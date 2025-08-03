@@ -230,19 +230,12 @@ static struct file_operations fops = {
 
 
 // DTS compatible 문자열과 일치하도록 of_device_id 테이블을 추가
+// dtbo로 overlay
 static const struct of_device_id oled_of_match[] = {
     { .compatible = "i2c-oled,ssd1306", },
     { }
 };
 MODULE_DEVICE_TABLE(of, oled_of_match);
-
-// 디바이스 트리 없이, 플랫폼 데이터(Platform Data)를 사용
-static const struct i2c_device_id oled_id[] = {
-    { DEV_NAME, 0 },
-    { }
-};
-MODULE_DEVICE_TABLE(i2c, oled_id);
-
 
 static int oled_ssd1306_probe(struct i2c_client *client)
 {
@@ -316,7 +309,6 @@ static struct i2c_driver oled_driver = {
     },
     .probe = oled_ssd1306_probe,
     .remove = oled_ssd1306_remove,
-    .id_table = oled_id,
 };
 
 static int __init oled_ssd1306_init(void)

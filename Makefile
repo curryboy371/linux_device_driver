@@ -35,6 +35,12 @@ all:
 		KBUILD_EXTRA_SYMBOLS=$(I2C_SYMBOLS)
 
 
+	$(MAKE) -C oled \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/oled \
+		KBUILD_EXTRA_SYMBOLS=$(I2C_SYMBOLS)
+
+
 # 전체 클린
 clean:
 	$(MAKE) -C myi2c clean \
@@ -49,17 +55,25 @@ clean:
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
 		DRIVER_DIR=$(BASE)/lcd1602
 
+
+	$(MAKE) -C oled clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/oled
+
 # 전체 모듈 로드 (raw 옵션 전달)
 load:
 	$(MAKE) -C myi2c load
 	$(MAKE) -C bmp180 load raw=$(raw)
 	$(MAKE) -C lcd1602 load raw=$(raw)
+	$(MAKE) -C oled load raw=$(raw)
 	dmesg | tail -n 20
 
 # 전체 모듈 언로드 (raw 옵션 전달)
 unload:
 	$(MAKE) -C lcd1602 unload raw=$(raw)
 	$(MAKE) -C bmp180 unload raw=$(raw)
+	$(MAKE) -C oled unload raw=$(raw)
+
 	$(MAKE) -C myi2c unload
 	dmesg | tail -n 20
 
