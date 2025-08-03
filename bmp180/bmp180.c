@@ -5,6 +5,7 @@
 
 #include <linux/device.h>
 
+#include "bmp180_def.h"
 
 /*
  * BMP180 Linux I2C 드라이버 (sysfs + 모듈 파라미터로 i2c 어댑터 지정)
@@ -31,57 +32,6 @@
 
 // slave address
 #define BMP180_NAME     "BMP180"
-#define BMP180_ADDR     0x77
-
-// busnum을 파라미터화
-// insmod bmp180.ko busnum=2
-static int busnum = 1;
-module_param(busnum, int, 0644);
-MODULE_PARM_DESC(busnum, "I2C bus number to attach BMP180");
-
-
-//  보정 테이블 레지스터 주소 0xAA부터
-#define CALIB_DATA_START    0xAA
-#define CALIB_DATA_END      0xBF
-#define CALIB_DATA_LENGTH   (CALIB_DATA_END - CALIB_DATA_START + 1)
-
-// 측정 데이터 저장 레지스터
-#define OUT_MSB     0xF6    // ro
-#define OUT_LSB     0xF7    // ro
-#define OUT_XLSB    0xF8    // ro
-
-// 명령 레지스터
-#define CTRL_MEAS   0xF4    // rw 측정 시작 명령어
-#define SOFT_RESET  0xE0    // rw 센서 초기화
-#define ID          0xD0    // ro 장치 ID 확인용
-
-#define SOFT_RESET_VALUE 0xB6   // 초기화 값
-
-// 측정 타입 레지스터
-#define TEMP    0x2E        // 온도 측정 명령
-#define PRESSURE 0x34       // 압력 측정 oss 0
-
-#define BMP_MSB     0
-#define BMP_LSB     1
-#define BMP_XLSB    2
-
-// calib 구조체
-struct bmp180_calib {
-	s16 AC1;
-	s16 AC2;
-	s16 AC3;
-	u16 AC4;
-	u16 AC5;
-	u16 AC6;
-	s16 B1;
-	s16 B2;
-	s16 MB;
-	s16 MC;
-	s16 MD;
-
-	s16 B5; // 레지스터 read 가 아닌 중간 계산값
-
-};
 
 // bmp180 data 구조체
 struct bmp180_data {
@@ -90,7 +40,13 @@ struct bmp180_data {
     u8 oss;
 };
 
-static struct i2c_client *bmp180_client;
+static const struct of_device_id bmp180_of_match[] = {
+    { .compatible = "bosch,bmp180" },
+    {}
+};
+MODULE_DEVICE_TABLE(of, bmp180_of_match);
+
+
 static const int OSS_WAIT_TIME_MS[4] = { 5, 8, 14, 26 };
 
 // 전방선언
@@ -112,7 +68,7 @@ static ssize_t pressure_store(struct device* dev, struct device_attribute* attr,
 static struct device_attribute dev_attr_temperature = {
     .attr = {
         .name = "temperature",
-        .mode  = 0666,
+        .mode  = 0644,
     },
     .show = temperature_show,
 };
@@ -120,7 +76,7 @@ static struct device_attribute dev_attr_temperature = {
 static struct device_attribute dev_attr_pressure = {
     .attr = {
         .name = "pressure",
-        .mode  = 0666,
+        .mode  = 0644,
     },
     .show = pressure_show,
     .store = pressure_store,
@@ -343,36 +299,29 @@ static int bmp180_probe(struct i2c_client* client)
     // 드라이버 전용 구조체 할당
     data = devm_kzalloc(&client->dev, sizeof(struct bmp180_data), GFP_KERNEL);
     if (!data)
-        return -1;
+        return -ENOMEM;
 
     data->client = client;
-	data->oss = 0;
-
+    data->oss = 0;
     dev_set_drvdata(&client->dev, data);
 
-    // sysfs attribute 등록
-    // /sys/bus/i2c/devices/1-0077/.... 하위 등록 value 생성
-    ret = sysfs_create_group(&client->dev.kobj, &bmp180_group);         // group으로 한번에
-    //ret = device_create_file(&client->dev, &dev_attr_temperature);
-    //ret = device_create_file(&client->dev, &dev_attr_pressure);
-
+    ret = sysfs_create_group(&client->dev.kobj, &bmp180_group);
     if (ret)
         return ret;
 
 
     // 센서 초기화
     ret = i2c_smbus_write_byte_data(client, SOFT_RESET, SOFT_RESET_VALUE);
-    if (ret < 0) {
+    if (ret < 0)
         return ret;
-    }
+
 
     msleep(10);    
 
     // 보정값 읽기 (여기서 data->calib 초기화 필요)
-	ret = bmp180_read_calib(client, &data->calib);
-	if (ret < 0)
-		return ret;    
-
+    ret = bmp180_read_calib(client, &data->calib);
+    if (ret < 0)
+        return ret;
 
     pr_info("finished BMP180 probed\n");
     return 0;
@@ -385,85 +334,28 @@ static void bmp180_remove(struct i2c_client* client) {
     pr_info("bmp180_remove\n");
 }
 
-
-// id table 매칭 사용
-// struct i2c_board_info bmp180_info = {
-// 	.type = "bmp180",
-// 	.addr = 0x77,
-// };
-static const struct i2c_device_id bmp180_id[] = {
-	{BMP180_NAME, 0 },
-	{ },
-};
-MODULE_DEVICE_TABLE(i2c, bmp180_id);
-
 static struct i2c_driver bmp180_driver = {
 
     .driver = {
 		.name	= BMP180_NAME,
-		//.of_match_table = bmp180_of_i2c_match,
+		.of_match_table = bmp180_of_match,
 	},
 	.probe		= bmp180_probe,
     .remove     = bmp180_remove,
-	.id_table	= bmp180_id,
 };
 
-
-// 모듈 insert 되었을 때 호출
 static int __init bmp180_init(void)
 {
-
-    int ret;
-    struct i2c_adapter* adapter = NULL;
-    struct i2c_board_info info = { I2C_BOARD_INFO(BMP180_NAME, BMP180_ADDR)};
-
-    pr_info("start bmp180_init\n");
-
-    // i2c 디바이스 등록 ( module_i2c_driver )
-    ret = i2c_add_driver(&bmp180_driver);
-    if (ret)
-        return ret;
-
-   
-    // bus 어뎁터 가져오기
-    adapter = i2c_get_adapter(busnum);  
-    if (!adapter) {
-        i2c_del_driver(&bmp180_driver);
-        return -ENODEV;
-    }
-
-    // 디바이스 등록 ( 장치 이름, 주소)
-    // 유저의 new_device 등록을 수행
-    // Device Tree에서 등록하여 부팅시 바인딩하는게 좋다고 함
-    bmp180_client = i2c_new_client_device(adapter, &info);
-
-    // bus 어뎁터 반환
-    i2c_put_adapter(adapter);
-
-    if (!bmp180_client) {
-        i2c_del_driver(&bmp180_driver);
-        return -ENODEV;
-    }
-
-    pr_info("finished bmp180_init\n");
-
-    return 0;
+    pr_info("bmp180 driver init\n");
+    return i2c_add_driver(&bmp180_driver);
 }
 
 static void __exit bmp180_exit(void)
 {
-    pr_info("start bmp180_exit\n");
-
-    if (bmp180_client)
-        i2c_unregister_device(bmp180_client);
-
-    // i2c 디바이스 해제 ( module_i2c_driver )
+    pr_info("bmp180 driver exit\n");
     i2c_del_driver(&bmp180_driver);
-
-    pr_info("finished bmp180_exit\n");
 }
 
-//module_i2c_driver(bmp180_driver);
 module_init(bmp180_init);
 module_exit(bmp180_exit);
 

@@ -14,6 +14,7 @@
 #include <linux/uaccess.h>
 #include <linux/cdev.h>
 
+#include "lcd1602_def.h"
 #include "my_i2c.h"
 
 
@@ -30,44 +31,7 @@
 
 
 
-#define LCD_CMD_CLEAR_DISPLAY         0x01  // 화면 클리어, 커서 홈
-#define LCD_CMD_RETURN_HOME           0x02  // 커서 홈으로 이동
-
-#define LCD_CMD_ENTRY_MODE_SET        0x06  // 커서 오른쪽 이동, 화면 이동 없음
-#define LCD_CMD_DISPLAY_ON_CURSOR_OFF 0x0C  // 디스플레이 ON, 커서 OFF
-#define LCD_CMD_DISPLAY_ON_CURSOR_ON  0x0E  // 디스플레이 ON, 커서 ON
-#define LCD_CMD_DISPLAY_ON_BLINK_ON   0x0F  // 디스플레이 ON, 커서 ON + 블링크
-
-#define LCD_CMD_DISPLAY_OFF           0x08  // 디스플레이 OFF, 커서 OFF
-#define LCD_CMD_CURSOR_SHIFT_LEFT     0x10  // 커서 왼쪽으로 이동
-#define LCD_CMD_CURSOR_SHIFT_RIGHT    0x14  // 커서 오른쪽으로 이동
-#define LCD_CMD_DISPLAY_SHIFT_LEFT    0x18  // 화면 왼쪽으로 쉬프트
-#define LCD_CMD_DISPLAY_SHIFT_RIGHT   0x1C  // 화면 오른쪽으로 쉬프트
-
-#define LCD_CMD_FUNCTION_SET_8BIT     0x30  // 초기 8비트 인터페이스 설정(초기화 단계)
-#define LCD_CMD_FUNCTION_SET_4BIT     0x20  // 4비트 인터페이스 모드로 전환
-#define LCD_CMD_FUNCTION_SET_2LINE    0x28  // 4비트 모드, 2라인, 5x8 도트
-
-#define LCD_CMD_SET_CGRAM_ADDR(addr)  (0x40 | ((addr) & 0x3F)) // CGRAM 주소 설정
-#define LCD_CMD_SET_DDRAM_ADDR(addr)  (0x80 | ((addr) & 0x7F)) // DDRAM 주소 설정 (커서 위치)
-
-#define LCD1602_LINE_WIDTH 16
-#define LCD1602_TOTAL_CHARS (LCD1602_LINE_WIDTH * 2) // 32자
-
-#define WRITE_TERM_US 50    // write 간격에서 텀
-
-// PCF8574 핀 맵 기준 제어 비트
-#define LCD_BACKLIGHT 0x08  // P7 = 백라이트 ON
-#define LCD_ENABLE    0x04  // P4 = E
-#define LCD_RW        0x02  // P5 = RW (0: write)
-#define LCD_RS        0x01  // P6 = RS (0: cmd, 1: data)
-
-// 0줄이면 0x00 + col
-// 1줄이면 0x40 + cal
-#define LCD_LINE_ADDR(row, col)   (((row)==0 ? 0x00 : 0x40) + (col))
-
 #define DEV_NAME "lcd1602_raw"
-#define LCD_ADDR 0x27
 
 static dev_t dev_num;
 static struct cdev lcd1602_cdev;
@@ -138,7 +102,7 @@ static void lcd_init_message(void) {
 
     lcd_move_cursor(1, 0);
 
-    for (int i = 0; line1[i] && i < LCD1602_LINE_WIDTH; i++) {
+    for (int i = 0; line2[i] && i < LCD1602_LINE_WIDTH; i++) {
         lcd_send_data(line2[i]);
     }
 

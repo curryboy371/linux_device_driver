@@ -1,7 +1,10 @@
-#ifndef BMP180_RAW_H
-#define BMP180_RAW_H
+#ifndef __BMP180_DEF_H__
+#define __BMP180_DEF_H__
 
 #include <linux/types.h>
+
+#define DEVICE_ADDR     0x77
+
 
 //  보정 테이블 레지스터 주소 0xAA~0xBF
 #define CALIB_DATA_START    0xAA
@@ -29,4 +32,13 @@
 #define BMP_XLSB    2
 
 
-#endif // BMP180_RAW_H
+// calib 구조체
+struct bmp180_calib {
+    s16 AC1, AC2, AC3;
+    u16 AC4, AC5, AC6;
+    s16 B1, B2, MB, MC, MD;
+    s32 B5; // 중간 계산에 사용됨
+};
+
+
+#endif // __BMP180_DEF_H__

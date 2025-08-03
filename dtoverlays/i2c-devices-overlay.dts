@@ -1,0 +1,26 @@
+/dts-v1/;
+/plugin/;
+
+&i2c1 {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    
+    ssd1306@3c {
+        compatible = "i2c-oled,ssd1306";
+        reg = <0x3c>;
+        status = "okay";
+    };
+
+    lcd1602@27 {
+        compatible = "i2c-lcd,lcd1602";
+        reg = <0x27>;
+        status = "okay";
+    };
+
+    bmp180@77 {
+        compatible = "bosch,bmp180";
+        reg = <0x77>;
+        status = "okay";
+    };
+
+};

@@ -11,7 +11,7 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 
-#include "bmp180_raw.h"
+#include "bmp180_def.h"
 
 #include "my_i2c.h"
 
@@ -35,16 +35,6 @@
 // slave address
 #define BMP180_CLASS_NAME "bmp180_raw"
 #define BMP180_DEVICE_NAME "bmp180"
-#define DEVICE_ADDR     0x77
-
-// calib 구조체
-struct bmp180_calib {
-    s16 AC1, AC2, AC3;
-    u16 AC4, AC5, AC6;
-    s16 B1, B2, MB, MC, MD;
-    s32 B5; // 중간 계산에 사용됨
-};
-
 
 
 // bmp180 data 
