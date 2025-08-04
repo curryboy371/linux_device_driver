@@ -17,8 +17,8 @@
 
 
 
-cat music.mp3 | sudo tee /dev/vs1003 > /dev/null
-
+cat test.mp3 | sudo tee /dev/vs1003 > /dev/null
+head -c 1024  test.mp3 | sudo tee /dev/vs1003 > /dev/null
 */
 
 #define DEV_NAME "vs1003"
@@ -26,7 +26,7 @@ cat music.mp3 | sudo tee /dev/vs1003 > /dev/null
 
 #define VS1003_BUF_SIZE 1024 
 
-
+#define MAX_ALLOWED_BYTES (128 * 1024)  // 예시
 #define SCI_MODE    0x00
 #define SCI_STATUS 0x01
 #define SCI_CLOCKF  0x03
@@ -98,282 +98,107 @@ static void vs1003_write_sci(struct vs1003_data *dev, u8 addr, u16 val)
     udelay(2);
 }
 
-// 1. 상세한 SPI 읽기 디버깅
-static u16 vs1003_read_sci_debug(struct vs1003_data *dev, u8 addr)
-{
-    // DREQ 상태 확인
-    int dreq_val = gpiod_get_value(dev->dreq_gpio);
-    pr_info("vs1003_read_sci_debug: DREQ=%d before transaction\n", dreq_val);
-    
-    // DREQ 대기
-    int timeout = 1000;
-    while (timeout-- > 0 && !gpiod_get_value(dev->dreq_gpio)) {
-        udelay(10);
-    }
-    
-    if (timeout <= 0) {
-        pr_warn("vs1003_read_sci_debug: DREQ timeout\n");
-        return 0xFFFF;
-    }
-    
-    u8 tx_buf[4] = { 0x03, addr, 0x00, 0x00 };
-    u8 rx_buf[4] = { 0xFF, 0xFF, 0xFF, 0xFF };  // 초기값을 0xFF로 설정
-    
-    struct spi_transfer xfer = {
-        .tx_buf = tx_buf,
-        .rx_buf = rx_buf,
-        .len = 4,
-        .speed_hz = 1000000,  // 1MHz로 속도 제한
-        .bits_per_word = 8,
-        .cs_change = 0,
-    };
-    struct spi_message msg;
-
-    spi_message_init(&msg);
-    spi_message_add_tail(&xfer, &msg);
-    
-    pr_info("vs1003_read_sci_debug: Before SPI - TX=[%02x %02x %02x %02x], RX=[%02x %02x %02x %02x]\n", 
-            tx_buf[0], tx_buf[1], tx_buf[2], tx_buf[3],
-            rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
-    
-    int ret = spi_sync(dev->spi, &msg);
-    
-    pr_info("vs1003_read_sci_debug: After SPI (ret=%d) - TX=[%02x %02x %02x %02x], RX=[%02x %02x %02x %02x]\n", 
-            ret, tx_buf[0], tx_buf[1], tx_buf[2], tx_buf[3],
-            rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
-    
-    // DREQ 상태 재확인
-    dreq_val = gpiod_get_value(dev->dreq_gpio);
-    pr_info("vs1003_read_sci_debug: DREQ=%d after transaction\n", dreq_val);
-    
-    u16 val = (rx_buf[2] << 8) | rx_buf[3];
-    pr_info("vs1003_read_sci_debug: addr=0x%02x, final val=0x%04x\n", addr, val);
-    
-    return val;
-}
-
-// 2. SPI 설정 확인 함수
-static void vs1003_check_spi_config(struct vs1003_data *dev)
-{
-    struct spi_device *spi = dev->spi;
-    
-    pr_info("vs1003_spi_config: max_speed_hz=%d\n", spi->max_speed_hz);
-    pr_info("vs1003_spi_config: mode=0x%02x\n", spi->mode);
-    pr_info("vs1003_spi_config: bits_per_word=%d\n", spi->bits_per_word);
-    pr_info("vs1003_spi_config: chip_select=%d\n", spi->chip_select);
-    
-    // GPIO 상태 확인
-    pr_info("vs1003_gpio_status: DREQ=%d, XDCS=%d, XRST=%d\n",
-            gpiod_get_value(dev->dreq_gpio),
-            gpiod_get_value(dev->dcs_gpio),
-            gpiod_get_value(dev->xrst_gpio));
-}
-
-// 3. 루프백 테스트 함수 (VS1003 없이 SPI 동작 확인)
-static int vs1003_spi_loopback_test(struct vs1003_data *dev)
-{
-    u8 tx_buf[4] = { 0xAA, 0x55, 0xCC, 0x33 };
-    u8 rx_buf[4] = { 0x00, 0x00, 0x00, 0x00 };
-    
-    struct spi_transfer xfer = {
-        .tx_buf = tx_buf,
-        .rx_buf = rx_buf,
-        .len = 4,
-        .speed_hz = 1000000,
-    };
-    struct spi_message msg;
-
-    spi_message_init(&msg);
-    spi_message_add_tail(&xfer, &msg);
-    
-    pr_info("vs1003_loopback: Before - TX=[%02x %02x %02x %02x]\n", 
-            tx_buf[0], tx_buf[1], tx_buf[2], tx_buf[3]);
-    
-    int ret = spi_sync(dev->spi, &msg);
-    
-    pr_info("vs1003_loopback: After (ret=%d) - RX=[%02x %02x %02x %02x]\n", 
-            ret, rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]);
-    
-    return ret;
-}
-
-// 4. 개선된 초기화 함수
-static int vs1003_init_chip_debug(struct vs1003_data *dev)
-{
-    int timeout = 1000;
-    u16 status, mode;
-    
-    pr_info("vs1003_init_debug: Starting initialization\n");
-    
-    // SPI 설정 확인
-    vs1003_check_spi_config(dev);
-    
-    // SPI 루프백 테스트
-    vs1003_spi_loopback_test(dev);
-    
-    // 1. 하드웨어 리셋
-    pr_info("vs1003_init_debug: Hardware reset\n");
-    gpiod_set_value(dev->xrst_gpio, 0);
-    msleep(20);  // 더 긴 리셋 시간
-    gpiod_set_value(dev->xrst_gpio, 1);
-    msleep(100); // 부팅 시간 충분히 대기
-    
-    // 2. DREQ 대기
-    while (timeout-- > 0) {
-        if (gpiod_get_value(dev->dreq_gpio)) {
-            pr_info("vs1003_init_debug: DREQ HIGH after %d ms\n", 1000-timeout);
-            break;
-        }
-        msleep(1);
-    }
-    
-    if (timeout <= 0) {
-        pr_err("vs1003_init_debug: DREQ timeout\n");
-        return -ENODEV;
-    }
-    
-    // 3. 초기 상태 확인 (디버그 모드)
-    pr_info("vs1003_init_debug: Reading initial registers\n");
-    status = vs1003_read_sci_debug(dev, SCI_STATUS);
-    mode = vs1003_read_sci_debug(dev, SCI_MODE);
-    
-    // 4. 간단한 쓰기 테스트 먼저
-    pr_info("vs1003_init_debug: Testing simple write\n");
-    vs1003_write_sci(dev, SCI_VOL, 0x4040);  // 간단한 볼륨 설정
-    msleep(10);
-    
-    u16 vol_readback = vs1003_read_sci_debug(dev, SCI_VOL);
-    pr_info("vs1003_init_debug: Volume write test - wrote 0x4040, read 0x%04x\n", vol_readback);
-    
-    if (vol_readback == 0x4040) {
-        pr_info("vs1003_init_debug: SPI communication working!\n");
-        return 0;
-    } else {
-        pr_err("vs1003_init_debug: SPI communication failed\n");
-        return -EIO;
-    }
-}
-
 // VS1003 초기화
 static int vs1003_init_chip(struct vs1003_data *dev)
 {
     int timeout = 1000;
-    u16 status, mode;
-    
-    // 1. 하드웨어 리셋
-    gpiod_set_value(dev->xrst_gpio, 0);  // LOW
-    msleep(10);
-    gpiod_set_value(dev->xrst_gpio, 1);  // HIGH
-    msleep(10);
-    
-    pr_debug("vs1003: XRST completed\n");
-    
-    // 2. DREQ가 HIGH가 될 때까지 대기
-    while (timeout-- > 0) {
-        if (gpiod_get_value(dev->dreq_gpio)) {
-            pr_debug("vs1003: DREQ is HIGH, ready for communication\n");
-            break;
-        }
-        msleep(1);
-    }
-    
-    if (timeout <= 0) {
-        pr_err("vs1003: DREQ timeout - chip may not be responding\n");
-        return -ENODEV;
-    }
-    
-    // 3. 초기화 전 상태 확인
-    status = vs1003_read_sci(dev, SCI_STATUS);
-    pr_debug("vs1003: Initial STATUS: 0x%04x\n", status);
-    
-    mode = vs1003_read_sci(dev, SCI_MODE);
-    pr_debug("vs1003: Initial MODE: 0x%04x\n", mode);
-    
-    // 4. 소프트웨어 리셋
-    vs1003_write_sci(dev, SCI_MODE, 0x0804);  // SM_SDINEW + SM_RESET
-    msleep(10);
-    
-    // 5. 리셋 후 DREQ 대기
+
+    // 하드웨어 리셋
+    gpiod_set_value(dev->xrst_gpio, 0);
+    msleep(20);  // 더 긴 리셋 시간
+    gpiod_set_value(dev->xrst_gpio, 1);
+    msleep(100); // 더 긴 대기 시간
+
+
+    // DREQ 대기
     timeout = 1000;
-    while (timeout-- > 0) {
-        if (gpiod_get_value(dev->dreq_gpio)) {
-            break;
-        }
+    while (timeout-- > 0 && !gpiod_get_value(dev->dreq_gpio)) {
         msleep(1);
     }
-    
     if (timeout <= 0) {
-        pr_err("vs1003: DREQ timeout after soft reset\n");
-        return -ENODEV;
+        return -ENODEV; 
     }
+
+    // 소프트 리셋
+    vs1003_write_sci(dev, SCI_MODE, 0x0804);  // SM_SDINEW + SM_RESET
+    msleep(100);
     
-    // 6. 클럭 설정
-    vs1003_write_sci(dev, SCI_CLOCKF, 0x9800);  // 3x clock
+    // DREQ 대기
+    timeout = 1000;
+    while (timeout-- > 0 && !gpiod_get_value(dev->dreq_gpio)) {
+        msleep(1);
+    }
+    if (timeout <= 0) {
+        return -ENODEV; 
+    }
+
+    // 클럭 설정 (더 안정적인 값)
+    vs1003_write_sci(dev, SCI_CLOCKF, 0x6000);  // 기본 클럭
     msleep(10);
     
-    // 7. 볼륨 설정
-    vs1003_write_sci(dev, SCI_VOL, 0x2020);     // -32dB
-    
-    // 8. 최종 상태 확인
-    status = vs1003_read_sci(dev, SCI_STATUS);
-    mode = vs1003_read_sci(dev, SCI_MODE);
-    
-    pr_debug("vs1003: Final STATUS: 0x%04x, MODE: 0x%04x\n", status, mode);
-    
-    // STATUS가 여전히 0이면 문제가 있음
-    if (status == 0x0000) {
-        pr_err("vs1003: STATUS register still 0x0000 - check connections\n");
-        return -ENODEV;
-    }
+    // 볼륨 설정 (더 높은 볼륨)
+    vs1003_write_sci(dev, SCI_VOL, 0x1010);     // -16dB
     
     return 0;
 }
 
+#define VS1003_CHUNK_SIZE 128  // MP3 프레임 단위 맞춤
 static ssize_t vs1003_write_stream(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
     struct vs1003_data *dev = file->private_data;
-    u8 tmp[VS1003_BUF_SIZE];
+    u8 tmp[VS1003_CHUNK_SIZE];
     size_t written = 0;
 
-    pr_debug("vs1003_write_stream: starting to write %zu bytes\n", count); // Log added
+    if (count > MAX_ALLOWED_BYTES) {
+        count = MAX_ALLOWED_BYTES;
+    }
+    
+    pr_debug("vs1003_write_stream: starting to write %zu bytes\n", count);
 
     while (written < count) {
-        // dreq가 high일 때만 전송 가능
-        if (!gpiod_get_value(dev->dreq_gpio)) {
-            pr_debug("vs1003_write_stream: DREQ is LOW, waiting...\n"); // Log added
-            udelay(10);
-            continue;
+        int timeout = 10000; // 10초로 증가 (10000 * 1ms)
+        
+        // DREQ 대기
+        while (!gpiod_get_value(dev->dreq_gpio)) {
+            if (timeout-- <= 0) {
+                pr_err("vs1003_write_stream: DREQ timeout after %zu bytes\n", written);
+                return written > 0 ? written : -ETIMEDOUT;
+            }
+            usleep_range(100, 200); // 100-200μs 대기 (더 정밀한 대기)
         }
-
-
-        // 데이터 복사
-        size_t to_copy = min(count - written, (size_t)VS1003_BUF_SIZE);
-        if (copy_from_user(tmp, buf + written, to_copy))
-            return -EFAULT;
-
-        // spi 전송
+        
+        size_t to_copy = min(count - written, (size_t)VS1003_CHUNK_SIZE);
+        if (copy_from_user(tmp, buf + written, to_copy)) {
+            pr_err("vs1003_write_stream: copy_from_user failed at %zu bytes\n", written);
+            return written > 0 ? written : -EFAULT;
+        }
+        
+        // SPI 전송
+        gpiod_set_value(dev->dcs_gpio, 0);
+        
         struct spi_transfer xfer = {
             .tx_buf = tmp,
             .len = to_copy,
         };
         struct spi_message msg;
-
-
-        // XDCS LOW (active-low이므로 0으로 설정하면 활성화)
-        gpiod_set_value(dev->dcs_gpio, 0);
-
         spi_message_init(&msg);
         spi_message_add_tail(&xfer, &msg);
-
-         // SPI 동기 전송
-        spi_sync(dev->spi, &msg);
-
-        // XDCS HIGH (비활성화)
-        gpiod_set_value(dev->dcs_gpio, 1);
+        
+        
+        int ret = spi_sync(dev->spi, &msg);
+        if (ret < 0) {
+            pr_err("vs1003_write_stream: spi_sync failed: %d\n", ret);
+            return written > 0 ? written : ret;
+        }
 
         written += to_copy;
-    }
 
+        if ((written % 1024) == 0 || written == count) {
+            pr_debug("vs1003_write_stream: written %zu/%zu bytes\n", written, count);
+        }
+    }
+    
+    pr_debug("vs1003_write_stream: completed %zu bytes\n", written);
     return written;
 }
 
@@ -384,10 +209,29 @@ static int vs1003_open(struct inode *inode, struct file *file)
     return 0;
 }
 
+static int vs1003_release(struct inode *inode, struct file *file)
+{
+    struct vs1003_data *dev = file->private_data;
+    pr_info("vs1003_release: device closed\n");
+
+    // 스트리밍 종료를 위한 soft reset 또는 SM_CANCEL 명령 전송
+    vs1003_write_sci(dev, SCI_MODE, 0x080C); // SM_SDINEW | SM_RESET
+        
+    // 최대 100ms 동안 대기
+    for (int i = 0; i < 100; i++) {
+        if (gpiod_get_value(dev->dreq_gpio))
+            break;
+        msleep(1);
+    }
+
+    return 0;
+}
+
 static const struct file_operations vs1003_fops = {
     .owner = THIS_MODULE,
     .open = vs1003_open,
     .write = vs1003_write_stream,
+    .release = vs1003_release,
 };
 
 static int vs1003_probe(struct spi_device *spi)
@@ -403,8 +247,20 @@ static int vs1003_probe(struct spi_device *spi)
         return -ENOMEM;
     }
 
+    
+    spi->mode = SPI_MODE_0;
+    spi->max_speed_hz = 1000000;  // 1MHz로 시작
+    spi->bits_per_word = 8;
+    ret = spi_setup(spi);
+    if (ret < 0) {
+        pr_err("vs1003: SPI setup failed\n");
+        return ret;
+    }
+
+
     vs1003_dev->spi = spi;
     mutex_init(&vs1003_dev->lock);
+
 
     vs1003_dev->dcs_gpio = devm_gpiod_get(dev, "dcs", GPIOD_OUT_HIGH);
     if (IS_ERR(vs1003_dev->dcs_gpio)) {
@@ -446,13 +302,6 @@ static int vs1003_probe(struct spi_device *spi)
         goto del_cdev;
     }
 
-
-    // GPIO 핀 번호 확인
-    pr_info("vs1003: GPIO pins - DCS:%d, DREQ:%d, XRST:%d\n",
-            desc_to_gpio(vs1003_dev->dcs_gpio),
-            desc_to_gpio(vs1003_dev->dreq_gpio),
-            desc_to_gpio(vs1003_dev->xrst_gpio));
-
     // GPIO 초기값 확인
     pr_info("vs1003: GPIO values - DCS:%d, DREQ:%d, XRST:%d\n",
             gpiod_get_value(vs1003_dev->dcs_gpio),
@@ -461,16 +310,16 @@ static int vs1003_probe(struct spi_device *spi)
 
     device_create(vs1003_dev->class, NULL, vs1003_dev->devt, NULL, DEV_NAME);
 
-    if(vs1003_init_chip_debug(vs1003_dev)) {
-        pr_err("vs1003: Failed to vs1003_init_chip\n");
-        goto del_cdev;
-    }
-
     if(vs1003_init_chip(vs1003_dev)) {
         pr_err("vs1003: Failed to vs1003_init_chip\n");
         goto del_cdev;
     }
 
+    // GPIO 초기값 확인
+    pr_info("vs1003: GPIO values - DCS:%d, DREQ:%d, XRST:%d\n",
+            gpiod_get_value(vs1003_dev->dcs_gpio),
+            gpiod_get_value(vs1003_dev->dreq_gpio),
+            gpiod_get_value(vs1003_dev->xrst_gpio));
 
     pr_info("vs1003: driver loaded successfully\n");
     return 0;

@@ -9,7 +9,9 @@ BASE := $(shell pwd)
 I2C_SYMBOLS := $(BASE)/myi2c/Module.symvers
 
 # 대상 장비 정보
-TARGET_IP := pi@192.168.219.106
+
+#TARGET_IP := pi@192.168.219.106
+TARGET_IP := pi@10.10.16.31
 TARGET_DIR := /home/pi/linux_device_driver
 
 
