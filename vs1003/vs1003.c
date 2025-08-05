@@ -12,6 +12,7 @@
 #include <linux/mutex.h>
 #include <linux/delay.h>
 
+#include "vs1003_def.h"
 
 /*
 
@@ -24,13 +25,7 @@ head -c 1024  test.mp3 | sudo tee /dev/vs1003 > /dev/null
 #define DEV_NAME "vs1003"
 #define CLASS_NAME "vs1003_class"
 
-#define VS1003_BUF_SIZE 1024 
-
-#define MAX_ALLOWED_BYTES (128 * 1024)  // 예시
-#define SCI_MODE    0x00
-#define SCI_STATUS 0x01
-#define SCI_CLOCKF  0x03
-#define SCI_VOL     0x0B
+#define VS1003_BUF_SIZE 32
 
 struct vs1003_data {
     struct spi_device *spi;
@@ -43,7 +38,46 @@ struct vs1003_data {
     struct mutex lock;
 };
 
+static const char *vs1003_register_name[] = {
+    "SCI_MODE",
+    "SCI_STATUS",
+    "SCI_BASS",
+    "SCI_CLOCKF",
+    "SCI_DECTIME",
+    "SCI_AUDATA",
+    "SCI_WRAM",
+    "SCI_WRAMADDR",
+    "SCI_HDAT0",
+    "SCI_HDAT1",
+    "SCI_AIADDR",
+    "SCI_VOL",
+    "SCI_AICTRL0",
+    "SCI_AICTRL1",
+    "SCI_AICTRL2",
+    "SCI_AICTRL3"
+};
+
+#define NUM_REGISTERS (sizeof(vs1003_register_name) / sizeof(vs1003_register_name[0]))
+
+
 static struct vs1003_data *vs1003_dev;
+
+static int vs1003_soft_reset(struct vs1003_data *dev);
+
+int vs1003_wait_for_dreq(struct vs1003_data *dev, int timeout_us)
+{
+    int waited = 0;
+
+    while (!gpiod_get_value(dev->dreq_gpio)) {
+        if (waited >= timeout_us) {
+            pr_err("vs1003_wait_for_dreq: Timeout\n");
+            return -ETIMEDOUT;
+        }
+        usleep_range(100, 200);  // 더 여유 있게 대기
+        waited += 100;
+    }
+    return 0;
+}
 
 // SCI 읽기 함수 추가
 static u16 vs1003_read_sci(struct vs1003_data *dev, u8 addr)
@@ -59,7 +93,7 @@ static u16 vs1003_read_sci(struct vs1003_data *dev, u8 addr)
         pr_warn("vs1003_read_sci: DREQ timeout\n");
     }
     
-    u8 tx_buf[4] = { 0x03, addr, 0x00, 0x00 }; // READ + ADDR + 2 dummy bytes
+    u8 tx_buf[4] = { VS1003_READ_COMMAND, addr, 0x00, 0x00 }; // READ + ADDR + 2 dummy bytes
     u8 rx_buf[4] = { 0, 0, 0, 0 };
     struct spi_transfer xfer = {
         .tx_buf = tx_buf,
@@ -80,157 +114,213 @@ static u16 vs1003_read_sci(struct vs1003_data *dev, u8 addr)
     return val;
 }
 
+
+static void vs1003_dump_registers(struct vs1003_data *dev)
+{
+    int i;
+    u16 val;
+    pr_info("=== VS1003 SCI Register Dump ===\n");
+
+    for (i = 0; i < NUM_REGISTERS; i++) {
+        val = vs1003_read_sci(dev, i);
+        pr_info("  %-12s : 0x%04X\n", vs1003_register_name[i], val);
+    }
+}
+
+
 static void vs1003_write_sci(struct vs1003_data *dev, u8 addr, u16 val)
 {
-    pr_debug("vs1003_write_sci: addr=0x%02x, val=0x%04x\n", addr, val); // Log added
+    pr_debug("vs1003_write_sci: addr=0x%02x, val=0x%04x\n", addr, val);
 
-    u8 buf[4] = { 0x02, addr, val >> 8, val & 0xFF };
+    u8 buf[VS1003_CMD_LEN] = { VS1003_WRITE_COMMAND, addr, val >> 8, val & 0xFF };
     struct spi_transfer xfer = {
         .tx_buf = buf,
-        .len = 4,
+        .len = VS1003_CMD_LEN,
     };
     struct spi_message msg;
 
     spi_message_init(&msg);
     spi_message_add_tail(&xfer, &msg);
-    spi_sync(dev->spi, &msg);  // SPI0_CE0 자동 사용됨
-
+    spi_sync(dev->spi, &msg);
     udelay(2);
 }
+
 
 // VS1003 초기화
 static int vs1003_init_chip(struct vs1003_data *dev)
 {
-    int timeout = 1000;
+    int timeout;
 
-    // 하드웨어 리셋
+    pr_info("vs1003_init_chip: resetting chip\n");
     gpiod_set_value(dev->xrst_gpio, 0);
-    msleep(20);  // 더 긴 리셋 시간
-    gpiod_set_value(dev->xrst_gpio, 1);
-    msleep(100); // 더 긴 대기 시간
-
-
-    // DREQ 대기
-    timeout = 1000;
-    while (timeout-- > 0 && !gpiod_get_value(dev->dreq_gpio)) {
-        msleep(1);
-    }
-    if (timeout <= 0) {
-        return -ENODEV; 
-    }
-
-    // 소프트 리셋
-    vs1003_write_sci(dev, SCI_MODE, 0x0804);  // SM_SDINEW + SM_RESET
-    msleep(100);
-    
-    // DREQ 대기
-    timeout = 1000;
-    while (timeout-- > 0 && !gpiod_get_value(dev->dreq_gpio)) {
-        msleep(1);
-    }
-    if (timeout <= 0) {
-        return -ENODEV; 
-    }
-
-    // 클럭 설정 (더 안정적인 값)
-    vs1003_write_sci(dev, SCI_CLOCKF, 0x6000);  // 기본 클럭
     msleep(10);
-    
-    // 볼륨 설정 (더 높은 볼륨)
-    vs1003_write_sci(dev, SCI_VOL, 0x1010);     // -16dB
-    
-    return 0;
-}
+    gpiod_set_value(dev->xrst_gpio, 1);
+    msleep(100);
 
-#define VS1003_CHUNK_SIZE 128  // MP3 프레임 단위 맞춤
-static ssize_t vs1003_write_stream(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
-{
-    struct vs1003_data *dev = file->private_data;
-    u8 tmp[VS1003_CHUNK_SIZE];
-    size_t written = 0;
-
-    if (count > MAX_ALLOWED_BYTES) {
-        count = MAX_ALLOWED_BYTES;
-    }
-    
-    pr_debug("vs1003_write_stream: starting to write %zu bytes\n", count);
-
-    while (written < count) {
-        int timeout = 10000; // 10초로 증가 (10000 * 1ms)
-        
-        // DREQ 대기
-        while (!gpiod_get_value(dev->dreq_gpio)) {
-            if (timeout-- <= 0) {
-                pr_err("vs1003_write_stream: DREQ timeout after %zu bytes\n", written);
-                return written > 0 ? written : -ETIMEDOUT;
-            }
-            usleep_range(100, 200); // 100-200μs 대기 (더 정밀한 대기)
-        }
-        
-        size_t to_copy = min(count - written, (size_t)VS1003_CHUNK_SIZE);
-        if (copy_from_user(tmp, buf + written, to_copy)) {
-            pr_err("vs1003_write_stream: copy_from_user failed at %zu bytes\n", written);
-            return written > 0 ? written : -EFAULT;
-        }
-        
-        // SPI 전송
-        gpiod_set_value(dev->dcs_gpio, 0);
-        
-        struct spi_transfer xfer = {
-            .tx_buf = tmp,
-            .len = to_copy,
-        };
-        struct spi_message msg;
-        spi_message_init(&msg);
-        spi_message_add_tail(&xfer, &msg);
-        
-        
-        int ret = spi_sync(dev->spi, &msg);
-        if (ret < 0) {
-            pr_err("vs1003_write_stream: spi_sync failed: %d\n", ret);
-            return written > 0 ? written : ret;
-        }
-
-        written += to_copy;
-
-        if ((written % 1024) == 0 || written == count) {
-            pr_debug("vs1003_write_stream: written %zu/%zu bytes\n", written, count);
-        }
-    }
-    
-    pr_debug("vs1003_write_stream: completed %zu bytes\n", written);
-    return written;
-}
-
-static int vs1003_open(struct inode *inode, struct file *file)
-{
-    pr_debug("vs1003_open: device opened\n");
-    file->private_data = vs1003_dev;
-    return 0;
-}
-
-static int vs1003_release(struct inode *inode, struct file *file)
-{
-    struct vs1003_data *dev = file->private_data;
-    pr_info("vs1003_release: device closed\n");
-
-    // 스트리밍 종료를 위한 soft reset 또는 SM_CANCEL 명령 전송
-    vs1003_write_sci(dev, SCI_MODE, 0x080C); // SM_SDINEW | SM_RESET
-        
-    // 최대 100ms 동안 대기
-    for (int i = 0; i < 100; i++) {
+    timeout = 1000;
+    while (timeout-- > 0) {
         if (gpiod_get_value(dev->dreq_gpio))
             break;
         msleep(1);
     }
+    if (timeout <= 0) {
+        pr_err("vs1003_init_chip: DREQ did not go HIGH after reset\n");
+        return -ENODEV;
+    }
+
+    pr_info("vs1003_init_chip: sending SM_RESET\n");
+    vs1003_write_sci(dev, SCI_MODE, SM_SDINEW | SM_RESET);
+    msleep(100);
+
+    timeout = 1000;
+    while (timeout-- > 0) {
+        if (gpiod_get_value(dev->dreq_gpio))
+            break;
+        msleep(1);
+    }
+    if (timeout <= 0) {
+        pr_err("vs1003_init_chip: DREQ did not recover after soft reset\n");
+        return -ENODEV;
+    }
+
+    pr_info("vs1003_init_chip: configuring CLOCKF\n");
+    vs1003_write_sci(dev, SCI_CLOCKF, 0x6000);
+    msleep(10);
+
+    pr_info("vs1003_init_chip: setting volume\n");
+    vs1003_write_sci(dev, SCI_VOL, 0xFEFE);
+
+    pr_info("vs1003_init_chip: initialization complete\n");
+    return 0;
+}
+
+static ssize_t vs1003_write_stream(struct vs1003_data *dev, const char __user *buf, size_t count)
+{
+    u8 data[VS1003_BUF_SIZE];
+    size_t remaining = count;
+    int ret = 0;
+
+    pr_info("vs1003_write_stream: starting to write %zu bytes\n", count);
+
+    while (remaining > 0) {
+        int to_copy = min((size_t)VS1003_BUF_SIZE, remaining);
+
+        if (vs1003_wait_for_dreq(dev, 200000) < 0) {  // 50ms 대기
+            pr_err("DREQ timeout after %zu bytes\n", count - remaining);
+            ret = -EIO;
+            break;
+        }
+
+        if (copy_from_user(data, buf + (count - remaining), to_copy)) {
+            pr_err("vs1003_write_stream: copy_from_user failed\n");
+            ret = -EFAULT;
+            break;
+        }
+
+        gpiod_set_value(dev->dcs_gpio, 0);
+        spi_write(dev->spi, data, to_copy);
+        gpiod_set_value(dev->dcs_gpio, 1);
+
+        remaining -= to_copy;
+        pr_debug("vs1003_write_stream: written %zu/%zu bytes\n", count - remaining, count);
+    }
+
+    return ret ? ret : count - remaining;
+}
+
+static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+    if (!vs1003_dev)
+        return -ENODEV;
+
+    return vs1003_write_stream(vs1003_dev, buf, count);
+}
+
+static int vs1003_open(struct inode *inode, struct file *file)
+{
+    pr_info("vs1003_open: device opened\n");
+    file->private_data = vs1003_dev;
+
+    // DREQ 상태 확인 (칩이 데이터 수신 가능 상태인지)
+    int timeout = 100;
+    while (timeout-- > 0) {
+        if (gpiod_get_value(vs1003_dev->dreq_gpio)) {
+            pr_info("vs1003_open: DREQ is HIGH, ready to stream\n");
+            return 0;
+        }
+        usleep_range(100, 200);  // 100~200us 대기
+    }
+
+    pr_warn("vs1003_open: DREQ not HIGH after wait, attempting soft reset\n");
+
+    // soft reset 시도
+    if (vs1003_soft_reset(vs1003_dev) < 0) {
+        pr_err("vs1003_open: DREQ still LOW after reset, device busy\n");
+        return -EBUSY;
+    }
+    pr_info("vs1003_open: device ready after soft reset\n");
+    return 0;
+}
+
+static int vs1003_soft_reset(struct vs1003_data *dev)
+{
+    pr_info("vs1003_soft_reset: Performing soft reset\n");
+    vs1003_write_sci(dev, SCI_MODE, SM_RESET | SM_SDINEW);
+    msleep(2);
+
+    int timeout = 1000;
+    while (timeout-- > 0 && !gpiod_get_value(dev->dreq_gpio))
+        udelay(10);
+
+    if (timeout <= 0) {
+        pr_err("vs1003_soft_reset: DREQ not HIGH after soft reset\n");
+        return -EIO;
+    }
+
+    // 기본 레지스터 재설정
+    vs1003_write_sci(dev, SCI_CLOCKF, 0x6000);
+    vs1003_write_sci(dev, SCI_AUDATA, 0x1F40);  // 8kHz stereo
+    vs1003_write_sci(dev, SCI_VOL, 0x2020);     // 기본 볼륨
+
+    // 확인용
+    if (!gpiod_get_value(dev->dreq_gpio)) {
+        pr_err("vs1003_soft_reset: DREQ not HIGH after soft reset");
+    } else {
+        pr_info("vs1003_soft_reset: DREQ is HIGH after reset");
+    }
 
     return 0;
 }
 
+static int vs1003_release(struct inode *inode, struct file *file) {
+
+    pr_info("vs1003_release: device closed\n");
+
+    // SM_CANCEL 보내서 현재 스트리밍 취소
+    pr_info("vs1003_release: sending SM_CANCEL\n");
+    vs1003_write_sci(vs1003_dev, SCI_MODE, SM_CANCEL | SM_SDINEW);
+    msleep(1);
+
+    int timeout = 1000;
+    while (timeout-- > 0) {
+        if (gpiod_get_value(vs1003_dev->dreq_gpio))
+            break;
+        udelay(10);
+    }
+
+    if (timeout <= 0) {
+        pr_warn("vs1003_release: DREQ not HIGH after SM_CANCEL, performing soft reset\n");
+        vs1003_soft_reset(vs1003_dev);
+    }
+
+    return 0;
+}
+
+
 static const struct file_operations vs1003_fops = {
     .owner = THIS_MODULE,
     .open = vs1003_open,
-    .write = vs1003_write_stream,
+    .write = vs1003_write,
     .release = vs1003_release,
 };
 
@@ -249,7 +339,7 @@ static int vs1003_probe(struct spi_device *spi)
 
     
     spi->mode = SPI_MODE_0;
-    spi->max_speed_hz = 1000000;  // 1MHz로 시작
+    spi->max_speed_hz = 500000;  // 1MHz로 시작
     spi->bits_per_word = 8;
     ret = spi_setup(spi);
     if (ret < 0) {
@@ -320,6 +410,9 @@ static int vs1003_probe(struct spi_device *spi)
             gpiod_get_value(vs1003_dev->dcs_gpio),
             gpiod_get_value(vs1003_dev->dreq_gpio),
             gpiod_get_value(vs1003_dev->xrst_gpio));
+
+
+    vs1003_dump_registers(vs1003_dev);
 
     pr_info("vs1003: driver loaded successfully\n");
     return 0;
