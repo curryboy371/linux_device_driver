@@ -1,0 +1,34 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2711"; // 라즈베리 파이 4 호환
+
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            my_spi_overlay: my-spi {
+                compatible = "chan,my-spi"; 
+                status = "okay";
+                
+                // devm_gpiod_get으로 찾을 gpio name
+                myspi-sclk-gpios = <&gpio 5 1>;  // GPIO 5 SCLK pull down
+                myspi-mosi-gpios = <&gpio 6 1>;  // GPIO 6 MOSI pull down
+                myspi-miso-gpios = <&gpio 13 0>; // GPIO 13 MISO pull up
+                myspi-cs-gpios = <&gpio 19 0>; // GPIO 19 CS pull up
+            };
+        };
+    };
+    
+    // 이 fragment는 GPIO 핀 자체의 설정을 위한 것입니다 (풀업/다운, 기능).
+    fragment@1 {
+        target = <&gpio>;
+        __overlay__ {
+            my_spi_pins: my_spi_pins {
+                brcm,pins = <13 19>; // miso mosi만
+                brcm,function = <0>; /* GPIO_IN (입력) */
+                brcm,pull = <2>; /* GPIO_PULLUP (풀업) */
+            };
+        };
+    };
+};

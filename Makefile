@@ -22,6 +22,11 @@ raw ?= 1
 
 # 전체 빌드
 all:
+	$(MAKE) -C myspi \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/myspi
+
+
 	$(MAKE) -C myi2c \
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
 		DRIVER_DIR=$(BASE)/myi2c
@@ -50,6 +55,12 @@ all:
 
 # 전체 클린
 clean:
+	$(MAKE) -C myspi clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/myspi
+
+
+
 	$(MAKE) -C myi2c clean \
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
 		DRIVER_DIR=$(BASE)/myi2c
@@ -67,12 +78,20 @@ clean:
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
 		DRIVER_DIR=$(BASE)/oled
 
+
+	$(MAKE) -C vs1003 clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/vs1003
+
+
 # 전체 모듈 로드 (raw 옵션 전달)
 load:
 	$(MAKE) -C myi2c load
 	$(MAKE) -C bmp180 load raw=$(raw)
 	$(MAKE) -C lcd1602 load raw=$(raw)
 	$(MAKE) -C oled load raw=$(raw)
+
+	$(MAKE) -C myspi load
 	dmesg | tail -n 20
 
 # 전체 모듈 언로드 (raw 옵션 전달)
@@ -82,6 +101,8 @@ unload:
 	$(MAKE) -C oled unload raw=$(raw)
 
 	$(MAKE) -C myi2c unload
+
+	$(MAKE) -C myspi unload
 	dmesg | tail -n 20
 
 # 언로드 후 다시 로드
