@@ -83,14 +83,12 @@ static my_spi_transfer_func_t my_spi_func_arr[SPI_MODE_MAX] = {
 // 내부 함수 전방선언
 static SPI_error_t my_spi_set_cs(spi_select_t slave_id, bool active);
 
-
-SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_message_t* message);
-
 static void my_spi_message_init(my_spi_message_t *m);
 static void my_spi_message_add_tail(my_spi_transfer_t* transfer, my_spi_message_t* msg);
+static void my_spi_message_cleanup(my_spi_message_t* msg);
 
 //spi_sync() / spi_async() (실제 전송)
-SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_message_t* message) {
+SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_transfer_t* xfer) {
 
     if(!slave_data) {
         pr_err("my_spi_sync: slave_data is NULL\n");
@@ -109,45 +107,36 @@ SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_message_t* messa
 
     my_spi_lock(g_my_spi_data);
 
+    my_spi_message_t message;
+
+    // 리스트 초기화
+    my_spi_message_init(&message);
+
+    // 리스트 추가( 추가노드 xfer, 리스트 헤드msg)
+    my_spi_message_add_tail(xfer, &message);
+
+
     // CS 활성화
     my_spi_set_cs(slave_data->slave_id, LOW);
     udelay(SPI_DELAY_US);
 
-    // 리스트 초기화
-    my_spi_message_init(message);
-
-    // 사용 예시
-    u8 tx_buf[4] = { 0x01, 0x02, 0x03, 0x04 }; // READ + ADDR + 2 dummy bytes
-    u8 rx_buf[4] = { 0x00, 0x00, 0x00, 0x00 };
-
-    // spi_transfer instance
-    my_spi_transfer_t xfer = {
-        .tx_buf = tx_buf,
-        .rx_buf = rx_buf,
-        .len = 4,
-    };
-
-    // 리스트 추가( 추가노드 xfer, 리스트 헤드msg)
-    my_spi_message_add_tail(&xfer, message);
-
     // 순회시 현재 노드를 가리킬 포인터
     my_spi_transfer_t* xfer_iter = NULL;
-    list_for_each_entry(xfer_iter, &message->transfers, transfer_list) {
-
+    list_for_each_entry(xfer_iter, &message.transfers, transfer_list) {
         if(xfer_iter) {
             for (size_t i = 0; i < xfer_iter->len; i++) {
-                u8 tx = xfer_iter->tx_buf ? ((u8*)xfer_iter->tx_buf)[i] : 0xFF;
-                u8 rx = 0;
-
-                // 로그 출력
-                pr_info("tx[%zu] = 0x%02X -> rx[%zu] = 0x%02X\n", i, tx, i, rx);
+                uint8_t tx = xfer_iter->tx_buf ? ((uint8_t*)xfer_iter->tx_buf)[i] : 0xFF;
+                uint8_t rx = 0x00;
 
                 // 현재 모드에 맞는 transfer 함수 호출
                 my_spi_func_arr[slave_data->mode](g_my_spi_data, tx, &rx);
 
                 if (xfer_iter->rx_buf) {
-                    ((u8*)xfer_iter->rx_buf)[i] = rx;
+                    ((uint8_t*)xfer_iter->rx_buf)[i] = rx;
                 }
+
+                // 로그 출력
+                pr_info("tx[%zu] = 0x%02X -> rx[%zu] = 0x%02X\n", i, tx, i, rx);
             }
         }
     }
@@ -156,11 +145,39 @@ SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_message_t* messa
     udelay(SPI_DELAY_US);
     my_spi_set_cs(slave_data->slave_id, HIGH);
 
+    // 메시지 정리
+    my_spi_message_cleanup(&message);
+
     my_spi_unlock(g_my_spi_data);
 
     return SPI_ERR_NONE;
 }
 
+SPI_error_t my_spi_ping_loopback(my_spi_slave_data_t* slave_data)
+{
+    uint8_t tx = 0xA5;
+    uint8_t rx = 0x00;
+
+    my_spi_transfer_t xfer = {
+        .tx_buf = &tx,
+        .rx_buf = &rx,
+        .len = 1,
+    };
+
+    SPI_error_t err = my_spi_sync(slave_data, &xfer);
+    if (err != SPI_ERR_NONE) {
+        pr_err("my_spi_ping_loopback: sync error %d\n", err);
+        return err;
+    }
+
+    if (tx != rx) {
+        pr_err("my_spi_ping_loopback: loopback failed! tx=0x%02X, rx=0x%02X\n", tx, rx);
+        return SPI_ERR_UNKNOWN;
+    }
+
+    pr_info("my_spi_ping_loopback: success! tx=0x%02X == rx=0x%02X\n", tx, rx);
+    return SPI_ERR_NONE;
+}
 
 static void my_spi_message_init(my_spi_message_t* msg) {
 
@@ -172,6 +189,18 @@ static void my_spi_message_init(my_spi_message_t* msg) {
 
 static void my_spi_message_add_tail(my_spi_transfer_t* transfer, my_spi_message_t* msg) {
     list_add_tail(&transfer->transfer_list, &msg->transfers);
+}
+
+static void my_spi_message_cleanup(my_spi_message_t* msg)
+{
+    my_spi_transfer_t *xfer, *tmp;
+
+    list_for_each_entry_safe(xfer, tmp, &msg->transfers, transfer_list) {
+        list_del(&xfer->transfer_list);
+
+        // 동적 할당 제거
+        // kfree(xfer);
+    }
 }
 
 void my_spi_lock(struct my_spi_data* data) {
@@ -232,7 +261,7 @@ SPI_error_t my_spi_register(my_spi_slave_data_t* slave) {
     pr_info("my_spi_register: Registered slave id=%d mode=%d\n", id, slave->mode);
 
     mutex_unlock(&g_my_spi_data->lock);
-    return SPI_ERR_UNKNOWN;
+    return SPI_ERR_NONE;
 }
 
 SPI_error_t my_spi_unregister(my_spi_slave_data_t* slave) {

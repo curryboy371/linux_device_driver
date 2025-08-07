@@ -16,6 +16,11 @@
                 myspi-mosi-gpios = <&gpio 6 1>;  // GPIO 6 MOSI pull down
                 myspi-miso-gpios = <&gpio 13 0>; // GPIO 13 MISO pull up
                 myspi-cs-gpios = <&gpio 19 0>; // GPIO 19 CS pull up
+
+                // vs1003 전용 제어 핀들 추가
+                myspi-xdcs-gpios = <&gpio 25 1>;  // XDCS: GPIO25, active-low
+                myspi-dreq-gpios = <&gpio 24 0>;  // DREQ: GPIO24, active-high
+                myspi-xrst-gpios = <&gpio 23 0>;  // XRST: GPIO23, active-high
             };
         };
     };

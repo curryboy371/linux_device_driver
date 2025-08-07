@@ -79,7 +79,10 @@ SPI_error_t my_spi_unregister(my_spi_slave_data_t* slave);
 void my_spi_lock(struct my_spi_data* data);
 void my_spi_unlock(struct my_spi_data* data);
 
-SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_message_t* message);
+SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_transfer_t* xfer);
+SPI_error_t my_spi_ping_loopback(my_spi_slave_data_t* slave_data);
+
+
 
 #endif // __MY_SPI_H__
 

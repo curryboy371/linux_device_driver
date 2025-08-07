@@ -7,18 +7,18 @@ CROSS_COMPILE := aarch64-linux-gnu-
 
 BASE := $(shell pwd)
 I2C_SYMBOLS := $(BASE)/myi2c/Module.symvers
+SPI_SYMBOLS := $(BASE)/myspi/Module.symvers
+
 
 # 대상 장비 정보
 
-#TARGET_IP := pi@192.168.219.106
-TARGET_IP := pi@10.10.16.31
+TARGET_IP := pi@192.168.219.106
+#TARGET_IP := pi@10.10.16.31
 TARGET_DIR := /home/pi/linux_device_driver
 
 
 # defualt 1 (raw 빌드)
 raw ?= 1
-
-
 
 # 전체 빌드
 all:
@@ -28,7 +28,8 @@ all:
 
 	$(MAKE) -C vs1003 \
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
-		DRIVER_DIR=$(BASE)/vs1003
+		DRIVER_DIR=$(BASE)/vs1003 \
+		KBUILD_EXTRA_SYMBOLS=$(SPI_SYMBOLS)
 
 
 	$(MAKE) -C myi2c \
@@ -58,6 +59,10 @@ clean:
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
 		DRIVER_DIR=$(BASE)/myspi
 
+	$(MAKE) -C vs1003 clean \
+		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		DRIVER_DIR=$(BASE)/vs1003
+
 
 	$(MAKE) -C myi2c clean \
 		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
@@ -77,19 +82,18 @@ clean:
 		DRIVER_DIR=$(BASE)/oled
 
 
-	$(MAKE) -C vs1003 clean \
-		KDIR=$(KDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
-		DRIVER_DIR=$(BASE)/vs1003
+
 
 
 # 전체 모듈 로드 (raw 옵션 전달)
 load:
-	$(MAKE) -C myi2c load
-	$(MAKE) -C bmp180 load raw=$(raw)
-	$(MAKE) -C lcd1602 load raw=$(raw)
-	$(MAKE) -C oled load raw=$(raw)
+# 	$(MAKE) -C myi2c load
+# 	$(MAKE) -C bmp180 load raw=$(raw)
+# 	$(MAKE) -C lcd1602 load raw=$(raw)
+# 	$(MAKE) -C oled load raw=$(raw)
 
-	$(MAKE) -C myspi load
+	$(MAKE) -C myspi load 
+	$(MAKE) -C vs1003 load raw=$(raw)
 	dmesg | tail -n 20
 
 # 전체 모듈 언로드 (raw 옵션 전달)
@@ -100,6 +104,7 @@ unload:
 
 	$(MAKE) -C myi2c unload
 
+	$(MAKE) -C vs1003 unload raw=$(raw)	
 	$(MAKE) -C myspi unload
 	dmesg | tail -n 20
 
@@ -120,6 +125,7 @@ print:
 	@echo "KDIR = $(KDIR)"
 	@echo "BASE = $(BASE)"
 	@echo "I2C_SYMBOLS = $(I2C_SYMBOLS)"
+	@echo "SPI_SYMBOLS = $(SPI_SYMBOLS)"
 
 	@echo "TARGET_IP = $(TARGET_IP)"
 	@echo "TARGET_DIR = $(TARGET_DIR)"

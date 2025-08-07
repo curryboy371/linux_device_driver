@@ -64,10 +64,18 @@ static ssize_t pressure_show(struct device *dev, struct device_attribute *attr, 
 
     mutex_lock(&myspi_sample_data->lock);
 
-    // 여기에 message 작성
-    // 지역변수로 사용해도 될듯
-    my_spi_message_t message;
-    my_spi_sync((my_spi_slave_data_t*)myspi_sample_data, &message);
+    // 사용 예시
+    uint8_t tx_buf[4] = { 0x01, 0x02, 0x03, 0x04 }; // READ + ADDR + 2 dummy bytes
+    uint8_t rx_buf[4] = { 0x00, 0x00, 0x00, 0x00 };
+
+    // spi_transfer instance
+    my_spi_transfer_t xfer = {
+        .tx_buf = tx_buf,
+        .rx_buf = rx_buf,
+        .len = 4,
+    };
+
+    my_spi_sync((my_spi_slave_data_t*)myspi_sample_data, &xfer);
     
     mutex_unlock(&myspi_sample_data->lock);
 
@@ -137,12 +145,15 @@ static int __init myspi_sample_raw_init(void)
         class_destroy(myspi_sample_class);
         return -ENOMEM;
     }
+    my_spi_slave_data_t* slave_data = (my_spi_slave_data_t*)myspi_sample_data;
 
     mutex_init(&myspi_sample_data->lock);
-    
-    my_spi_slave_init((my_spi_slave_data_t*)myspi_sample_data);
 
-    err = my_spi_register((my_spi_slave_data_t*)myspi_sample_data);
+    my_spi_slave_init(slave_data);
+
+    slave_data->mode = SPI_MODE_0;
+
+    err = my_spi_register(slave_data);
     if(err != SPI_ERR_NONE) {
         kfree(myspi_sample_data);
         device_destroy(myspi_sample_class, 0);

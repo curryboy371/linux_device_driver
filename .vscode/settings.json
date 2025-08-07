@@ -1,0 +1,19 @@
+{
+    "files.associations": {
+        "types.h": "c",
+        "cstdlib": "c",
+        "rotary_module.h": "c",
+        "cstdint": "c",
+        "compare": "c",
+        "module.h": "c",
+        "kernel.h": "c",
+        "bmp180_raw.h": "c",
+        "my_i2c.h": "c",
+        "string.h": "c",
+        "oled_font.h": "c",
+        "lcd1602_def.h": "c",
+        "typeinfo": "c",
+        "limits": "c",
+        "fcntl.h": "c"
+    }
+}

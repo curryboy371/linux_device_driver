@@ -5,10 +5,10 @@ DRIVER_DIR ?= $(shell pwd)
 KDIR ?= $(HOME)/project/linux
 ARCH ?= arm64
 CROSS_COMPILE ?= aarch64-linux-gnu-
-#KBUILD_EXTRA_SYMBOLS ?= $(abspath $(DRIVER_DIR)/../myi2c/Module.symvers)
+KBUILD_EXTRA_SYMBOLS ?= $(abspath $(DRIVER_DIR)/../myspi/Module.symvers)
 
 # myi2c 헤더 참조용
-#ccflags-y += -I$(src)/../myi2c
+ccflags-y += -I$(src)/../myspi
 
 # 모듈 이름 및 .ko 파일 경로 매크로
 MODULE_NAME := vs1003
@@ -18,8 +18,7 @@ RAW_MODULE_NAME := vs1003_raw
 RAW_MODULE_KO := $(RAW_MODULE_NAME).ko
 
 # 모듈 목록
-obj-m := vs1003.o
-#obj-m := vs1003.o vs1003_raw.o
+obj-m := vs1003.o vs1003_raw.o
 
 all:
 	make -C $(KDIR) \
