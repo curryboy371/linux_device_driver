@@ -22,13 +22,13 @@ typedef enum {
     SPI_ERR_UNKNOWN               // 알 수 없는 오류
 } SPI_error_t;
 
-typedef enum spi_mode {
-    SPI_MODE_0 = 0,     // CPOL=0, CPHA=0
-    SPI_MODE_1,         // CPOL=0, CPHA=1
-    SPI_MODE_2,         // CPOL=1, CPHA=0
-    SPI_MODE_3,         // CPOL=1, CPHA=1
-    SPI_MODE_MAX       // 모드 없음 (초기값)
-} spi_mode_t;
+typedef enum my_spi_mode {
+    MYSPI_MODE_0 = 0,     // CPOL=0, CPHA=0
+    MYSPI_MODE_1,         // CPOL=0, CPHA=1
+    MYSPI_MODE_2,         // CPOL=1, CPHA=0
+    MYSPI_MODE_3,         // CPOL=1, CPHA=1
+    MYSPI_MODE_MAX       // 모드 없음 (초기값)
+} my_spi_mode_t;
 
 typedef enum spi_select {
     SPI_SLAVE_0 = 0,    // 0번 슬레이브
@@ -40,7 +40,7 @@ typedef enum spi_select {
 
 // SPI Slave data 구조체
 typedef struct my_spi_slave_data {
-    spi_mode_t mode; // slave spi mode
+    my_spi_mode_t mode; // slave spi mode
     spi_select_t slave_id; // slave의 id
     struct mutex lock;
 }my_spi_slave_data_t;

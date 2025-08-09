@@ -14,6 +14,7 @@
         spi-max-frequency = <4000000>;
 
         xdcs-gpios = <&gpio 25 1>;  // XDCS (GPIO 25 active low)
+        xcs-gpios  = <&gpio 18 1>;   // XCS (GPIO 18, 수동 active low)
         dreq-gpios = <&gpio 24 0>; // DREQ (GPIO24, active-high)
         xrst-gpios = <&gpio 23 0>;   // XRST 핀 (GPIO23, active-high)
     };

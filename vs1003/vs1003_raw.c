@@ -154,7 +154,7 @@ static int __init vs1003_init(void)
     mutex_init(&vs1003_dev->lock);
 
     my_spi_slave_init(&vs1003_dev->slave);
-    vs1003_dev->slave.mode = SPI_MODE_0;
+    vs1003_dev->slave.mode = MYSPI_MODE_0;
 
     ret = my_spi_register(&vs1003_dev->slave);
     if (ret != SPI_ERR_NONE) {

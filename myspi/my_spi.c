@@ -73,11 +73,11 @@ static void my_spi_transfer_byte_mode1(my_spi_data_t* data, uint8_t tx_byte, uin
 static void my_spi_transfer_byte_mode2(my_spi_data_t* data, uint8_t tx_byte, uint8_t *rx_byte);
 static void my_spi_transfer_byte_mode3(my_spi_data_t* data, uint8_t tx_byte, uint8_t *rx_byte);
 
-static my_spi_transfer_func_t my_spi_func_arr[SPI_MODE_MAX] = {
-    [SPI_MODE_0] = my_spi_transfer_byte_mode0,
-    [SPI_MODE_1] = my_spi_transfer_byte_mode1,
-    [SPI_MODE_2] = my_spi_transfer_byte_mode2,
-    [SPI_MODE_3] = my_spi_transfer_byte_mode3,
+static my_spi_transfer_func_t my_spi_func_arr[MYSPI_MODE_MAX] = {
+    [MYSPI_MODE_0] = my_spi_transfer_byte_mode0,
+    [MYSPI_MODE_1] = my_spi_transfer_byte_mode1,
+    [MYSPI_MODE_2] = my_spi_transfer_byte_mode2,
+    [MYSPI_MODE_3] = my_spi_transfer_byte_mode3,
 };
 
 // 내부 함수 전방선언
@@ -100,7 +100,7 @@ SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_transfer_t* xfer
         return SPI_ERR_NON_SELECT;
     } 
 
-    if(slave_data->mode == SPI_MODE_MAX) {
+    if(slave_data->mode == MYSPI_MODE_MAX) {
         pr_err("my_spi_sync: non select slave mode\n");
         return SPI_ERR_NON_MODE;
     } 
@@ -223,7 +223,7 @@ void my_spi_slave_init(my_spi_slave_data_t* slave) {
     }
 
     slave->slave_id = SPI_SLAVE_MAX;
-    slave->mode = SPI_MODE_MAX;
+    slave->mode = MYSPI_MODE_MAX;
 }
 
 
@@ -239,7 +239,7 @@ SPI_error_t my_spi_register(my_spi_slave_data_t* slave) {
         return SPI_ERR_UNKNOWN;
     }
 
-    if (slave->mode == SPI_MODE_MAX) {
+    if (slave->mode == MYSPI_MODE_MAX) {
         pr_err("my_spi_register: Invalid mode %d\n", slave->mode);
         return SPI_ERR_NON_MODE;
     }

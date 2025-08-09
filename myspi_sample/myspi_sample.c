@@ -151,7 +151,7 @@ static int __init myspi_sample_raw_init(void)
 
     my_spi_slave_init(slave_data);
 
-    slave_data->mode = SPI_MODE_0;
+    slave_data->mode = MYSPI_MODE_0;
 
     err = my_spi_register(slave_data);
     if(err != SPI_ERR_NONE) {
