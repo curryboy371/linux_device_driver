@@ -1,6 +1,6 @@
 #define pr_fmt(fmt) "[VS1003] " fmt
 
-//#define DEBUG
+#define DEBUG
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -18,8 +18,21 @@
 #include <linux/interrupt.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/kstrtox.h>
+#include <linux/minmax.h>
+#include <linux/atomic.h>
 
 #include "vs1003_def.h"
+
+/*
+
+    // 볼륨 확인
+    cat /sys/class/vs1003_class/vs1003/volume
+
+    // 볼륨 설정 (percent)
+    echo 75 | sudo tee /sys/class/vs1003_class/vs1003/volume
+*/
+
 
 #define DEV_NAME "vs1003"
 #define CLASS_NAME "vs1003_class"
@@ -34,6 +47,7 @@ struct vs1003_data {
     struct cdev cdev;
     dev_t devt;
     struct mutex lock;
+    struct device* device;
 
 
     // KFIFO Streaming
@@ -43,20 +57,31 @@ struct vs1003_data {
     wait_queue_head_t wq_space;    // FIFO 공간 대기
     struct work_struct xfer_work;  // 전송 워커
     int dreq_irq;                  // DREQ IRQ 번호
-    bool streaming_enabled;        // 전송 가능 상태 플래그
+    bool xfer_enabled;             // fifo 전송 가능 상태 플래그
 
 
-    struct device *device;          // sysfs 제어
+    // volume 설정
+    uint16_t volume_byte;          // 설정된 볼륨 byte 값
+    uint16_t volume_target_byte;   // target 볼륨 byte 값
+    atomic_t volume_pending;       // 1이면 pending
 
-    // 저장용 값
-    uint16_t volume;
+    atomic_t play_state;            // 재생 상태
 };
 
 static struct vs1003_data *vs1003_dev;
 
+
+static inline uint8_t vs1003_vol_percent_to_byte(unsigned int percent);
+static inline unsigned int vs1003_vol_byte_to_percent(uint8_t v);
+
+static ssize_t volume_percent_show(struct device *dev, struct device_attribute *attr, char *buf);
+static ssize_t volume_percent_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
+
+
+static int vs1003_write_sci(struct vs1003_data *dev, uint8_t addr, uint16_t data);
+
 static int vs1003_soft_reset(struct vs1003_data *dev);
 static void vs1003_force_hard_reset(struct vs1003_data *dev);
-
 
 // xcs와 xdcs는 dts에서 active low이므로 코드상 설정과 물리적 출력이 반대임
 static inline void xcs_select(struct vs1003_data *d)   { gpiod_set_value(d->xcs_gpio, 1); }
@@ -65,6 +90,103 @@ static inline void xcs_deselect(struct vs1003_data *d) { gpiod_set_value(d->xcs_
 static inline void xdcs_select(struct vs1003_data *d)   { gpiod_set_value(d->xdcs_gpio, 1); }
 static inline void xdcs_deselect(struct vs1003_data *d) { gpiod_set_value(d->xdcs_gpio, 0); }
 
+
+
+// attribute 구조체 정의
+static struct device_attribute dev_attr_volume = {
+    .attr = {
+        .name = "volume",
+        .mode  = 0644,
+    },
+    .show = volume_percent_show,
+    .store = volume_percent_store,
+};
+
+// attribute array 생성
+static struct attribute *vs1003_attrs[] = {
+    &dev_attr_volume.attr,
+    NULL,
+};
+
+// grroup화
+static const struct attribute_group vs1003_group = {
+    .attrs = vs1003_attrs,
+};
+
+/* volume_percent: 0~100 */
+static ssize_t volume_percent_show(struct device* dev, struct device_attribute* attr, char* buf) {
+
+    struct vs1003_data* vs1003_dev = dev_get_drvdata(dev);
+
+    // 좌우가 동일하므로 왼쪽만 체크
+    uint8_t left_byte = (vs1003_dev->volume_byte >> 8) & 0xFF;
+    unsigned int percent = vs1003_vol_byte_to_percent(left_byte);
+
+    pr_debug("volume_percent_show: raw=0x%04X, left=0x%02X, percent=%u\n", vs1003_dev->volume_byte, left_byte, percent);
+
+    return scnprintf(buf, PAGE_SIZE, "%u\n", percent);
+}
+
+static ssize_t volume_percent_store(struct device* dev, struct device_attribute* attr, const char* buf, size_t count) {
+
+
+    struct vs1003_data* vs1003_dev = dev_get_drvdata(dev);
+
+    unsigned int percent = 0;
+    int ret = kstrtouint(buf, 0, &percent);
+    if (ret) {
+        return ret;
+    }
+
+    percent = clamp(percent, 0u, 100u);
+
+    uint8_t vol_byte = vs1003_vol_percent_to_byte(percent);
+    uint16_t vol_reg = ((uint16_t)vol_byte << 8) | vol_byte;
+
+
+    // 재생중인 경우 비동기로 적용함
+    if (atomic_read(&vs1003_dev->play_state) == PLAY_PLAYING) {
+        vs1003_dev->volume_target_byte = vol_reg;
+
+        // 멀티 CPU 간 메모리 쓰기 순서만 보장 (SMP 환경에서만 의미 있음, UP에서는 no-op)
+        smp_wmb();   
+
+        atomic_set(&vs1003_dev->volume_pending, 1);
+        queue_work(vs1003_dev->wq, &vs1003_dev->xfer_work);
+        pr_debug("volume_percent_store: pending ...\n");
+        return count;
+    }
+
+    // 재생중이지 않은 경우 바로 적용
+    mutex_lock(&vs1003_dev->lock);
+    ret = vs1003_write_sci(vs1003_dev, SCI_VOL, vol_reg);
+    mutex_unlock(&vs1003_dev->lock);
+    if (ret) {
+        return ret;
+    }
+    pr_debug("volume_percent_store: set input=%u, clamped=%u, vol_byte=0x%02X, vol_reg=0x%04X\n", percent, percent, vol_byte, vol_reg);
+
+    vs1003_dev->volume_byte = vol_reg;
+    return count;
+}
+
+// percent to volume reg byte로 변환하는 함수
+static inline uint8_t vs1003_vol_percent_to_byte(unsigned int percent) {
+    if (percent >= 100) {
+        return MAX_VOLUME;
+    }
+
+    return (uint8_t)((100 - percent) * MIN_VOLUME / 100);
+}
+
+// volume byte를 percent로 변환
+static inline unsigned int vs1003_vol_byte_to_percent(uint8_t v) {
+    
+    if (v == MAX_VOLUME) return 100;
+    if (v >= MIN_VOLUME) return 0;
+
+    return (unsigned int)((MIN_VOLUME - v) * 100 / MIN_VOLUME);
+}
 
 static int vs1003_wait_dreq(struct vs1003_data *dev, int usec_timeout) {
     int dreq_val;
@@ -197,18 +319,53 @@ static void vs1003_xfer_work(struct work_struct *work) {
 
     struct vs1003_data *dev = container_of(work, struct vs1003_data, xfer_work);
     unsigned int copied;
-
-    if (!dev->streaming_enabled) {
-        return;
-    }
-
     uint8_t tmp[VS1003_CHUNK_SIZE];
     int ret;
 
+
     while(true) {
 
-        // DREQ가 LOW면 멈춤
+        if (!READ_ONCE(dev->xfer_enabled))
+            break;
+
+        // 재생 중 볼륨 pending이 걸린 경우 먼저 처리
+        // SDI를 멈추고 SCI를 먼저 처리하도록
+        if (atomic_read(&dev->volume_pending)) {
+            uint16_t target = READ_ONCE(dev->volume_target_byte);
+
+            ret = vs1003_wait_dreq(dev, 200000);
+            if (ret == 0) {
+
+                // SCI 적용을 시도하는 순간에만 pending value 0으로
+                if (atomic_xchg(&dev->volume_pending, 0)) {
+                    mutex_lock(&dev->lock);
+                    ret = vs1003_write_sci(dev, SCI_VOL, target);
+                    mutex_unlock(&dev->lock);
+
+                    if (ret == 0) {
+                        dev->volume_byte = target;
+                        pr_debug("xfer_work: volume applied 0x%04X\n", target);
+                    } else {
+                        // 실패시 pending 복구
+                        atomic_set(&dev->volume_pending, 1);
+                        pr_warn("xfer_work: volume apply failed ret=%d\n", ret);
+
+                        // SDI 전송으로 돌아가지 않고 enqueue
+                        queue_work(dev->wq, &dev->xfer_work);
+                        break;
+                    }
+                }
+            }
+            else {
+                // SCI 다시 시도
+                queue_work(dev->wq, &dev->xfer_work);
+                break;
+            }
+        }
+        
+        // 코덱이 SDI 받을 준비가 안 됐으면 다시 enqueue
         if (!gpiod_get_value(dev->dreq_gpio)) {
+            queue_work(dev->wq, &dev->xfer_work);
             break;
         }
 
@@ -223,6 +380,12 @@ static void vs1003_xfer_work(struct work_struct *work) {
             // KFIFO에 공간이 생겼으므로 이것을 Noti함
             // 결과적으로 vs1003_write에서 kfifo의 공간이 부족해서 대기하는 프로세스가 접근함
             wake_up_interruptible(&dev->wq_space);
+
+            if (atomic_read(&dev->play_state) != PLAY_STOPPED) {
+                atomic_set(&dev->play_state, PLAY_STOPPED);
+                pr_debug("xfer_work: state -> PLAY_STOPPED\n");
+            }
+
             break;
         }
 
@@ -247,52 +410,24 @@ static void vs1003_xfer_work(struct work_struct *work) {
             break;
         }
 
+        if (atomic_read(&dev->play_state) != PLAY_PLAYING) {
+            atomic_set(&dev->play_state, PLAY_PLAYING);
+        }
+
         // spi 전송 완료 후 fifo 공간이 생김에 따라 NOTI
         // 결과적으로 vs1003_write에서 kfifo의 공간이 부족해서 대기하는 프로세스가 접근함
         wake_up_interruptible(&dev->wq_space);
+
+        // 전송 직후 volume pending이 있는 경우 continue 후 바로 volume set 시도하도록
+        if (atomic_read(&dev->volume_pending)) {
+            cond_resched();
+            continue;
+        }
 
         // DREQ가 계속 HIGH이고, FIFO 데이터가 남아있다면 잠시 양보함
         // 더 높은 우선순위 프로세스에게 양보
         cond_resched();
     }
-}
-
-static int vs1003_set_volume(struct vs1003_data *dev, bool is_up)
-{
-    int ret;
-    uint16_t current_vol, new_vol;
-    uint16_t step = VOLUME_STEP;
-
-    // read 현재 볼륨
-    ret = vs1003_read_sci(dev, SCI_VOL, &current_vol);
-    if (ret < 0) {
-        pr_err("Failed to read current volume\n");
-        return ret;
-    }
-
-    if (is_up) {
-        if (current_vol <= MAX_VOLUME + step) {
-            new_vol = MAX_VOLUME;
-        } else {
-            new_vol = current_vol - step;
-        }
-        pr_debug("Volume Up: 0x%04x -> 0x%04x\n", current_vol, new_vol);
-    } else {
-        if (current_vol >= MIN_VOLUME - step) {
-            new_vol = MIN_VOLUME;
-        } else {
-            new_vol = current_vol + step;
-        }
-        pr_debug("Volume Down: 0x%04x -> 0x%04x\n", current_vol, new_vol);
-    }
-
-    // wirte new volume
-    ret = vs1003_write_sci(dev, SCI_VOL, new_vol);
-    if (ret < 0) {
-        pr_err("Failed to write new volume\n");
-        return ret;
-    }
-    return 0;
 }
 
 static void vs1003_force_hard_reset(struct vs1003_data *dev) {
@@ -354,16 +489,19 @@ static int vs1003_soft_reset(struct vs1003_data *dev) {
         pr_warn("SCI_AUDATA mismatch: expected 0x%04x, got 0x%04x\n", VS1003_DEFAULT_AUDATA, val);
     }
 
-    // write volume
-    ret = vs1003_write_sci(dev, SCI_VOL, VS1003_DEFAULT_VOLUME);
+    uint16_t vol_reg = ((uint16_t)dev->volume_byte << 8) | dev->volume_byte; // 좌우 동일하게
+    ret = vs1003_write_sci(dev, SCI_VOL, vol_reg);
     if (ret < 0) {
         return ret;
     }
     msleep(1);
     ret = vs1003_read_sci(dev, SCI_VOL, &val);
-    if (ret < 0 || val != VS1003_DEFAULT_VOLUME) {
-        pr_warn("SCI_VOL mismatch: expected 0x%04x, got 0x%04x\n", VS1003_DEFAULT_VOLUME, val);
+    if (ret < 0 || val != vol_reg) {
+        pr_warn("SCI_VOL mismatch: expected 0x%04x, got 0x%04x\n", vol_reg, val);
     }
+
+    dev->volume_byte = vol_reg;
+
 
     return 0;
 }
@@ -378,6 +516,13 @@ static int vs1003_init_chip(struct vs1003_data *dev) {
         pr_err("vs1003_init_chip: DREQ timeout after hard reset\n");
         return ret;
     }
+
+    uint8_t vol_byte = vs1003_vol_percent_to_byte(VS1003_DEFAULT_VOLUME_PER);
+    uint16_t vol_reg = (vol_byte << 8) | vol_byte;
+    dev->volume_byte = vol_reg;
+
+    // volume pending 초기화
+    atomic_set(&dev->volume_pending, 0);
 
     return vs1003_soft_reset(dev);
 }
@@ -422,7 +567,8 @@ static int vs1003_init_kfifo(struct vs1003_data *dev) {
         goto err_wq;
     }
 
-    dev->streaming_enabled = true;
+    dev->xfer_enabled = true;
+    atomic_set(&dev->play_state, PLAY_STOPPED);
 
     // DREQ가 이미 HIGH인 경우
     // request_threaded_irq() 호출 직후 DREQ가 이미 HIGH라면
@@ -512,12 +658,15 @@ static int vs1003_kfifo_stop(struct vs1003_data *dev) {
         }
     }
 
+
+    atomic_set(&dev->play_state, PLAY_STOPPED);
+
     return 0;
 }
 
 static void vs1003_kfifo_release(struct vs1003_data *dev) {
 
-    dev->streaming_enabled = false;
+    dev->xfer_enabled = false;
 
     if (dev->dreq_irq >= 0) {
         synchronize_irq(dev->dreq_irq);
@@ -555,11 +704,11 @@ static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t co
         unsigned int copied = 0;
 
         // fifo 공간이 생기거나, stream이 비활성화 될 때까지 대기
-        if (wait_event_interruptible(dev->wq_space, kfifo_avail(&dev->fifo) > 0 || !READ_ONCE(dev->streaming_enabled))) {
+        if (wait_event_interruptible(dev->wq_space, kfifo_avail(&dev->fifo) > 0 || !READ_ONCE(dev->xfer_enabled))) {
             return -ERESTARTSYS;
         }
 
-        if (!dev->streaming_enabled) {
+        if (!dev->xfer_enabled) {
             return -EPIPE;
         }
 
@@ -632,31 +781,32 @@ static int vs1003_probe(struct spi_device *spi) {
 
     spi->mode = SPI_MODE_0;
     spi->mode |= SPI_NO_CS; // CS 비활성
-    spi->max_speed_hz = 2000000; // 최대 속도 증가
+    spi->max_speed_hz = VS1003_STREAM_HZ;
     spi->bits_per_word = 8;
+
     ret = spi_setup(spi);
     if (ret) {
         pr_err("vs1003_probe: spi_setup failed\n");
         return ret;
     }
 
-    vs1003_dev->spi = spi;
+     vs1003_dev->spi = spi;
     mutex_init(&vs1003_dev->lock);
 
-    // GPIO 설정 개선 - 더 구체적인 에러 처리
+    /* GPIO 설정 */
     vs1003_dev->dreq_gpio = devm_gpiod_get(dev, "dreq", GPIOD_IN);
     if (IS_ERR(vs1003_dev->dreq_gpio)) {
         pr_err("vs1003_probe: failed to get dreq gpio\n");
         return PTR_ERR(vs1003_dev->dreq_gpio);
     }
 
-    vs1003_dev->xcs_gpio = devm_gpiod_get(dev, "xcs", GPIOD_OUT_LOW); // dts active low이므로 low=물리적 high
+    vs1003_dev->xcs_gpio = devm_gpiod_get(dev, "xcs", GPIOD_OUT_LOW);
     if (IS_ERR(vs1003_dev->xcs_gpio)) {
         pr_err("vs1003_probe: failed to get xcs gpio\n");
         return PTR_ERR(vs1003_dev->xcs_gpio);
     }
 
-    vs1003_dev->xdcs_gpio = devm_gpiod_get(dev, "xdcs", GPIOD_OUT_LOW); // dts active low이므로 low=물리적 high
+    vs1003_dev->xdcs_gpio = devm_gpiod_get(dev, "xdcs", GPIOD_OUT_LOW);
     if (IS_ERR(vs1003_dev->xdcs_gpio)) {
         pr_err("vs1003_probe: failed to get xdcs gpio\n");
         return PTR_ERR(vs1003_dev->xdcs_gpio);
@@ -668,7 +818,7 @@ static int vs1003_probe(struct spi_device *spi) {
         return PTR_ERR(vs1003_dev->xrst_gpio);
     }
 
-    // 문자 디바이스 등록
+    /* 문자 디바이스 등록 */
     ret = alloc_chrdev_region(&vs1003_dev->devt, 0, 1, DEV_NAME);
     if (ret < 0) {
         pr_err("vs1003_probe: alloc_chrdev_region failed\n");
@@ -679,44 +829,60 @@ static int vs1003_probe(struct spi_device *spi) {
     ret = cdev_add(&vs1003_dev->cdev, vs1003_dev->devt, 1);
     if (ret < 0) {
         pr_err("vs1003_probe: cdev_add failed\n");
-        unregister_chrdev_region(vs1003_dev->devt, 1);
-        return ret;
+        goto err_chrdev;
     }
 
     vs1003_dev->class = class_create(CLASS_NAME);
     if (IS_ERR(vs1003_dev->class)) {
         pr_err("vs1003_probe: class_create failed\n");
-        cdev_del(&vs1003_dev->cdev);
-        unregister_chrdev_region(vs1003_dev->devt, 1);
-        return PTR_ERR(vs1003_dev->class);
+        ret = PTR_ERR(vs1003_dev->class);
+        goto err_cdev;
     }
 
-    device_create(vs1003_dev->class, NULL, vs1003_dev->devt, NULL, DEV_NAME);
-    
-    // 칩 초기화
+    vs1003_dev->device = device_create(vs1003_dev->class, NULL, vs1003_dev->devt, NULL, DEV_NAME);
+    if (IS_ERR(vs1003_dev->device)) {
+        pr_err("device_create failed\n");
+        ret = PTR_ERR(vs1003_dev->device);
+        goto err_class;
+    }
+
+    /* sysfs: drvdata 연결 + 그룹 생성 */
+    dev_set_drvdata(vs1003_dev->device, vs1003_dev);
+    ret = sysfs_create_group(&vs1003_dev->device->kobj, &vs1003_group);
+    if (ret) {
+        pr_err("sysfs_create_group failed: %d\n", ret);
+        goto err_device;
+    }
+
+    // vs1003 칩 초기화
     ret = vs1003_init_chip(vs1003_dev);
     if (ret < 0) {
         pr_err("vs1003_probe: chip initialization failed\n");
-        device_destroy(vs1003_dev->class, vs1003_dev->devt);
-        class_destroy(vs1003_dev->class);
-        cdev_del(&vs1003_dev->cdev);
-        unregister_chrdev_region(vs1003_dev->devt, 1);
-        return ret;
+        goto err_sysfs;
     }
 
     // kfifo 초기화
     ret = vs1003_init_kfifo(vs1003_dev);
-    if(ret < 0) {
+    if (ret < 0) {
         pr_err("vs1003_probe: kfifo initialization failed\n");
-        device_destroy(vs1003_dev->class, vs1003_dev->devt);
-        class_destroy(vs1003_dev->class);
-        cdev_del(&vs1003_dev->cdev);
-        unregister_chrdev_region(vs1003_dev->devt, 1);
-        return ret;
+        goto err_sysfs;
     }
+
 
     pr_debug("vs1003_probe: successfully initialized\n");
     return 0;
+
+err_sysfs:
+    sysfs_remove_group(&vs1003_dev->device->kobj, &vs1003_group);
+err_device:
+    device_destroy(vs1003_dev->class, vs1003_dev->devt);
+err_class:
+    class_destroy(vs1003_dev->class);
+err_cdev:
+    cdev_del(&vs1003_dev->cdev);
+err_chrdev:
+    unregister_chrdev_region(vs1003_dev->devt, 1);
+    return ret;
 }
 
 static void vs1003_remove(struct spi_device *spi) {
@@ -726,6 +892,9 @@ static void vs1003_remove(struct spi_device *spi) {
     vs1003_kfifo_stop(vs1003_dev);
 
     vs1003_kfifo_release(vs1003_dev);
+
+    if (vs1003_dev->device)
+        sysfs_remove_group(&vs1003_dev->device->kobj, &vs1003_group);
 
     device_destroy(vs1003_dev->class, vs1003_dev->devt);
     class_destroy(vs1003_dev->class);

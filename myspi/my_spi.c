@@ -478,22 +478,6 @@ static void my_spi_transfer_byte_mode3(my_spi_data_t* data, uint8_t tx_byte, uin
         *rx_byte = read;
 }
 
-static SPI_error_t my_spi_clock_tick(my_spi_data_t* data) {
-
-    if (!data) {
-        pr_err("my_spi_clock_tick: data is NULL\n");
-        return SPI_ERR_UNKNOWN;
-    }
-
-    if(data->selected_slave_id == SPI_SLAVE_MAX) {
-        pr_err("my_spi_clock_tick: No slave selected\n");
-        return SPI_ERR_NON_SELECT;
-    }
-
-
-    return SPI_ERR_NON_MODE;
-}
-
 // 플랫폼 드라이버 등록
 static int my_spi_probe(struct platform_device *pdev) {
     struct device *dev = &pdev->dev;

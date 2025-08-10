@@ -38,9 +38,12 @@
 #define SM_LINE_IN              0x4000    // 녹음 시 마이크 입력 대신 라인 입력 소스를 사용하도록 전환
 
 /* Volume */
-#define MIN_VOLUME 0xFEFE
-#define MAX_VOLUME 0x0000
-#define VOLUME_STEP 0x0101      // 볼륨 조절 단위
+#define MIN_VOLUME 0xFE         // 한쪽 기준
+#define MAX_VOLUME 0x00         // 한쪽 기준
+
+  /* 선형 근사: 100%->0x00, 0%->0xFE */
+
+
 
 /* VS1003 BUFFER SIZE */
 #define VS1003_FIFO_SIZE   (64 * 1024)   // 64KB
@@ -55,6 +58,14 @@
 /* VS1003 Default Values */
 #define VS1003_DEFAULT_CLOCKF   0x8800 // 기본 클록 값
 #define VS1003_DEFAULT_AUDATA   0xAC45 // 기본 오디오 데이터값
-#define VS1003_DEFAULT_VOLUME   0x1010 // 기본 볼륨값
+#define VS1003_DEFAULT_VOLUME_PER 80   // 기본 볼륨값 - 퍼센트
+
+
+typedef enum vs1003_playstate {
+    PLAY_STOPPED = 0,
+    PLAY_PLAYING,
+    PLAY_PAUSED,
+} vs1003_playstate_t;
+
 
 #endif // __VS1003_DEF_H__
