@@ -37,6 +37,9 @@
 #define SM_ADPCM                0x1000    // ADPCM 녹음 기능을 활성화
 #define SM_LINE_IN              0x4000    // 녹음 시 마이크 입력 대신 라인 입력 소스를 사용하도록 전환
 
+#define SM_TESTS                0x0020    // TEST
+
+
 /* Volume */
 #define MIN_VOLUME 0xFE         // 한쪽 기준
 #define MAX_VOLUME 0x00         // 한쪽 기준
