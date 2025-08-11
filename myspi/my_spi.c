@@ -50,6 +50,8 @@ typedef struct my_spi_data {
     struct gpio_desc* miso_dec;   // 데이터 입력 (주변장치 → 컨트롤러)
     struct gpio_desc* cs_dec;     // 슬레이브 선택 (active-low)
 
+    int max_speed_hz; // max speed 
+    
     int ready; // 드라이버 준비 상태
 
     // bitmap 사용 내부적으로 bit index로 관리

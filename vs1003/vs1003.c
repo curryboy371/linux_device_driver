@@ -74,8 +74,8 @@ static struct vs1003_data *vs1003_dev;
 
 static int vs1003_diag_selftest(struct vs1003_data *dev);
 
-static inline uint8_t vs1003_vol_percent_to_byte(unsigned int percent);
-static inline unsigned int vs1003_vol_byte_to_percent(uint8_t v);
+// static inline uint8_t vs1003_vol_percent_to_byte(unsigned int percent);
+// static inline unsigned int vs1003_vol_byte_to_percent(uint8_t v);
 
 static ssize_t volume_percent_show(struct device *dev, struct device_attribute *attr, char *buf);
 static ssize_t volume_percent_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count);
@@ -158,24 +158,6 @@ static ssize_t volume_percent_store(struct device* dev, struct device_attribute*
     queue_work(vs1003_dev->wq, &vs1003_dev->xfer_work);
     pr_debug("volume_percent_store: pending ...\n");
     return count;
-}
-
-// percent to volume reg byte로 변환하는 함수
-static inline uint8_t vs1003_vol_percent_to_byte(unsigned int percent) {
-    if (percent >= 100) {
-        return MAX_VOLUME;
-    }
-
-    return (uint8_t)((100 - percent) * MIN_VOLUME / 100);
-}
-
-// volume byte를 percent로 변환
-static inline unsigned int vs1003_vol_byte_to_percent(uint8_t v) {
-    
-    if (v == MAX_VOLUME) return 100;
-    if (v >= MIN_VOLUME) return 0;
-
-    return (unsigned int)((MIN_VOLUME - v) * 100 / MIN_VOLUME);
 }
 
 static int vs1003_wait_dreq(struct vs1003_data *dev, int usec_timeout) {
@@ -423,122 +405,6 @@ static void vs1003_xfer_work(struct work_struct *work) {
         cond_resched();
     }
 }
-
-
-// static void vs1003_xfer_work(struct work_struct *work) {
-
-//     struct vs1003_data *dev = container_of(work, struct vs1003_data, xfer_work);
-//     unsigned int copied;
-//     uint8_t tmp[VS1003_CHUNK_SIZE];
-//     int ret;
-
-
-//     while(true) {
-
-//         if (!READ_ONCE(dev->xfer_enabled))
-//             break;
-
-//         // 재생 중 볼륨 pending이 걸린 경우 먼저 처리
-//         // SDI를 멈추고 SCI를 먼저 처리하도록
-//         if (atomic_read(&dev->volume_pending)) {
-//             uint16_t target = READ_ONCE(dev->volume_target_byte);
-
-//             ret = vs1003_wait_dreq(dev, 200000);
-//             if (ret == 0) {
-
-//                 // SCI 적용을 시도하는 순간에만 pending value 0으로
-//                 if (atomic_xchg(&dev->volume_pending, 0)) {
-//                     mutex_lock(&dev->lock);
-//                     ret = vs1003_write_sci(dev, SCI_VOL, target);
-//                     mutex_unlock(&dev->lock);
-
-//                     if (ret == 0) {
-//                         dev->volume_byte = target;
-//                         pr_debug("xfer_work: volume applied 0x%04X\n", target);
-//                     } else {
-//                         // 실패시 pending 복구
-//                         atomic_set(&dev->volume_pending, 1);
-//                         pr_warn("xfer_work: volume apply failed ret=%d\n", ret);
-
-//                         // SDI 전송으로 돌아가지 않고 enqueue
-//                         queue_work(dev->wq, &dev->xfer_work);
-//                         break;
-//                     }
-//                 }
-//             }
-//             else {
-//                 // SCI 다시 시도
-//                 queue_work(dev->wq, &dev->xfer_work);
-//                 break;
-//             }
-//         }
-        
-//         // 코덱이 SDI 받을 준비가 안 됐으면 다시 enqueue
-//         if (!gpiod_get_value(dev->dreq_gpio)) {
-//             queue_work(dev->wq, &dev->xfer_work);
-//             break;
-//         }
-
-//         // FIFO에서 buffer에서 data pop
-//         mutex_lock(&dev->fifo_lock);
-//         copied = kfifo_out(&dev->fifo, tmp, sizeof(tmp));
-//         mutex_unlock(&dev->fifo_lock);
-
-//         if (copied == 0) {
-//             // 더이상 보낼 데이터가 없음
-//             // writer 깨워줌
-//             // KFIFO에 공간이 생겼으므로 이것을 Noti함
-//             // 결과적으로 vs1003_write에서 kfifo의 공간이 부족해서 대기하는 프로세스가 접근함
-//             wake_up_interruptible(&dev->wq_space);
-
-//             if (atomic_read(&dev->play_state) != PLAY_STOPPED) {
-//                 atomic_set(&dev->play_state, PLAY_STOPPED);
-//                 pr_debug("xfer_work: state -> PLAY_STOPPED\n");
-//             }
-
-//             break;
-//         }
-
-
-//         // XDCS On 후 SPI 전송
-//         xdcs_select(dev);
-//         {
-//             struct spi_transfer t = {
-//                 .tx_buf   = tmp,
-//                 .len      = copied,
-//                 .speed_hz = VS1003_STREAM_HZ, 
-//             };
-//             struct spi_message m;
-//             spi_message_init(&m);
-//             spi_message_add_tail(&t, &m);
-//             ret = spi_sync(dev->spi, &m);
-//         }
-//         xdcs_deselect(dev);
-
-//         if (ret < 0) {
-//             pr_err("xfer_work: spi_sync failed ret=%d\n", ret);
-//             break;
-//         }
-
-//         if (atomic_read(&dev->play_state) != PLAY_PLAYING) {
-//             atomic_set(&dev->play_state, PLAY_PLAYING);
-//         }
-
-//         // spi 전송 완료 후 fifo 공간이 생김에 따라 NOTI
-//         // 결과적으로 vs1003_write에서 kfifo의 공간이 부족해서 대기하는 프로세스가 접근함
-//         wake_up_interruptible(&dev->wq_space);
-
-//         // 전송 직후 volume pending이 있는 경우 continue 후 바로 volume set 시도하도록
-//         if (atomic_read(&dev->volume_pending)) {
-//             cond_resched();
-//             continue;
-//         }
-
-//         // DREQ가 계속 HIGH이고, FIFO 데이터가 남아있다면 잠시 양보함
-//         // 더 높은 우선순위 프로세스에게 양보
-//         cond_resched();
-//     }
-// }
 
 // work queue 실행 후 sci를 write하는 함수
 static bool vs1003_sci_work(struct vs1003_data* dev) {
@@ -913,7 +779,7 @@ static int vs1003_kfifo_stop(struct vs1003_data *dev) {
 
 static void vs1003_kfifo_release(struct vs1003_data *dev) {
 
-    dev->xfer_enabled = false;
+    WRITE_ONCE(dev->xfer_enabled, false);
 
     if (dev->dreq_irq >= 0) {
         synchronize_irq(dev->dreq_irq);
@@ -1138,6 +1004,8 @@ err_chrdev:
 static void vs1003_remove(struct spi_device *spi) {
 
     pr_debug("vs1003_remove\n");
+
+    flush_work(&vs1003_dev->xfer_work);
 
     vs1003_kfifo_stop(vs1003_dev);
 

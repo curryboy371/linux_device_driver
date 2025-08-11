@@ -61,7 +61,7 @@
 /* VS1003 Default Values */
 #define VS1003_DEFAULT_CLOCKF   0x8800 // 기본 클록 값
 #define VS1003_DEFAULT_AUDATA   0xAC45 // 기본 오디오 데이터값
-#define VS1003_DEFAULT_VOLUME_PER 80   // 기본 볼륨값 - 퍼센트
+#define VS1003_DEFAULT_VOLUME_PER 70   // 기본 볼륨값 - 퍼센트
 
 
 typedef enum vs1003_playstate {
@@ -69,6 +69,27 @@ typedef enum vs1003_playstate {
     PLAY_PLAYING,
     PLAY_PAUSED,
 } vs1003_playstate_t;
+
+/* inline 공통 함수 */
+
+/* 0~100% → VS1003 VOL 바이트 */
+static inline uint8_t vs1003_vol_percent_to_byte(unsigned int percent)
+{
+    percent = clamp_t(unsigned int, percent, 0, 100);
+    if (percent >= 100)
+        return MAX_VOLUME;
+
+    return (uint8_t)((100 - percent) * MIN_VOLUME / 100);
+}
+
+/* VS1003 VOL 바이트 → 0~100% */
+static inline unsigned int vs1003_vol_byte_to_percent(uint8_t v)  {
+
+    if (v == MAX_VOLUME) return 100;
+    if (v >= MIN_VOLUME) return 0;
+
+    return (unsigned int)((MIN_VOLUME - v) * 100 / MIN_VOLUME);
+}
 
 
 #endif // __VS1003_DEF_H__

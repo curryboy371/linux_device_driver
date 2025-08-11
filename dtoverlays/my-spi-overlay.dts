@@ -1,38 +1,37 @@
 /dts-v1/;
 /plugin/;
-
 / {
-    compatible = "brcm,bcm2711"; // 라즈베리 파이 4 호환
+    compatible = "brcm,bcm2711";
 
-    fragment@0 {
+    fragment@1 {
         target-path = "/";
         __overlay__ {
-            my_spi_overlay: my-spi {
-                compatible = "chan,my-spi"; 
+            myspi0: myspi@0 {                 
+                compatible = "chan,my-spi";
                 status = "okay";
-                
-                // devm_gpiod_get으로 찾을 gpio name
-                myspi-sclk-gpios = <&gpio 5 1>;  // GPIO 5 SCLK pull down
-                myspi-mosi-gpios = <&gpio 6 1>;  // GPIO 6 MOSI pull down
-                myspi-miso-gpios = <&gpio 13 0>; // GPIO 13 MISO pull up
-                myspi-cs-gpios = <&gpio 19 0>; // GPIO 19 CS pull up
 
-                // vs1003 전용 제어 핀들 추가
-                myspi-xdcs-gpios = <&gpio 25 1>;  // XDCS: GPIO25, active-low
-                myspi-dreq-gpios = <&gpio 24 0>;  // DREQ: GPIO24, active-high
-                myspi-xrst-gpios = <&gpio 23 0>;  // XRST: GPIO23, active-high
-            };
-        };
-    };
-    
-    // 이 fragment는 GPIO 핀 자체의 설정을 위한 것입니다 (풀업/다운, 기능).
-    fragment@1 {
-        target = <&gpio>;
-        __overlay__ {
-            my_spi_pins: my_spi_pins {
-                brcm,pins = <13 19>; // miso mosi만
-                brcm,function = <0>; /* GPIO_IN (입력) */
-                brcm,pull = <2>; /* GPIO_PULLUP (풀업) */
+                #address-cells = <1>;         // ← 자식 주소/크기 셀
+                #size-cells = <0>;
+                ranges = <0 0 0>;             // ← 자식(1셀) 0 → 부모(2셀) 0:0 매핑
+
+                myspi-sclk-gpios = <&gpio 5  0>;
+                myspi-mosi-gpios = <&gpio 6  0>;
+                myspi-miso-gpios = <&gpio 13 0>;
+                // myspi-cs-gpios  = <&gpio 19 1>;
+
+                vs1003_raw: vs1003@0 {
+                    compatible = "chan,vs1003";   // 필요시 "chan,vs1003-raw" 로 구분
+                    reg = <0>;
+                    myspi = <&myspi0>;            // phandle
+
+                    xcs-gpios  = <&gpio 22 1>;
+                    xdcs-gpios = <&gpio 27 1>;
+                    dreq-gpios = <&gpio 17 0>;
+                    xrst-gpios = <&gpio 4  0>;
+
+                    speed-hz = <2000000>;
+                    status = "okay";
+                };
             };
         };
     };

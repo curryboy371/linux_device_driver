@@ -19,3 +19,5 @@
         xrst-gpios = <&gpio 23 0>;   // XRST 핀 (GPIO23, active-high)
     };
 };
+
+
