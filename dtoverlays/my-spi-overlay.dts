@@ -1,37 +1,22 @@
 /dts-v1/;
 /plugin/;
-/ {
+/{
     compatible = "brcm,bcm2711";
 
-    fragment@1 {
-        target-path = "/";
+    fragment@0 {
+        target-path = "/soc";
         __overlay__ {
-            myspi0: myspi@0 {                 
-                compatible = "chan,my-spi";
+            myspi: myspi {
+                compatible = "chan,my-spi", "simple-bus";
                 status = "okay";
 
-                #address-cells = <1>;         // ← 자식 주소/크기 셀
+                /* SPI 버스 관례 */
+                #address-cells = <1>;
                 #size-cells = <0>;
-                ranges = <0 0 0>;             // ← 자식(1셀) 0 → 부모(2셀) 0:0 매핑
 
-                myspi-sclk-gpios = <&gpio 5  0>;
-                myspi-mosi-gpios = <&gpio 6  0>;
+                myspi-sclk-gpios = <&gpio 5 0>;
+                myspi-mosi-gpios = <&gpio 6 0>;
                 myspi-miso-gpios = <&gpio 13 0>;
-                // myspi-cs-gpios  = <&gpio 19 1>;
-
-                vs1003_raw: vs1003@0 {
-                    compatible = "chan,vs1003";   // 필요시 "chan,vs1003-raw" 로 구분
-                    reg = <0>;
-                    myspi = <&myspi0>;            // phandle
-
-                    xcs-gpios  = <&gpio 22 1>;
-                    xdcs-gpios = <&gpio 27 1>;
-                    dreq-gpios = <&gpio 17 0>;
-                    xrst-gpios = <&gpio 4  0>;
-
-                    speed-hz = <2000000>;
-                    status = "okay";
-                };
             };
         };
     };

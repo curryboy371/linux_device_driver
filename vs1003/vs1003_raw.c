@@ -1,5 +1,4 @@
-#define pr_fmt(fmt) "[VS1003_MYSPI] " fmt
-
+#define pr_fmt(fmt) "[VS1003_RAW] " fmt
 #define DEBUG
 
 #include <linux/module.h>
@@ -21,6 +20,9 @@
 #include <linux/atomic.h>
 #include <linux/minmax.h>
 
+#include <linux/platform_device.h>
+
+
 #include "my_spi.h"
 #include "vs1003_def.h"
 
@@ -39,8 +41,8 @@
 
 /* Device Name */
 
-#define DEV_NAME   "vs1003"
-#define CLASS_NAME "vs1003_class"
+#define DEV_NAME   "vs1003_raw"
+#define CLASS_NAME "vs1003_raw_class"
 
 /* Device Tree GPIO label names */
 #define GPIO_LABEL_XCS  "myspi-xcs"
@@ -49,6 +51,8 @@
 #define GPIO_LABEL_XRST "myspi-xrst"
 
 struct vs1003_data {
+    struct device *device;
+
     my_spi_slave_data_t slave;
     struct mutex        spi_lock;   // spi 통신 동시 접근 제한
 
@@ -62,7 +66,6 @@ struct vs1003_data {
     struct class *class;
     struct cdev  cdev;
     dev_t        devt;
-    struct device *device;
 
     struct mutex ctl_lock;          // vs1003 모듈 lock
 
@@ -639,8 +642,8 @@ static int vs1003_kfifo_stop(struct vs1003_data *dev)
     return 0;
 }
 
-static void vs1003_kfifo_release(struct vs1003_data *dev)
-{
+static void vs1003_kfifo_release(struct vs1003_data *dev) {
+
     WRITE_ONCE(dev->xfer_enabled, false);
 
     if (dev->dreq_irq >= 0) {
@@ -660,27 +663,34 @@ static void vs1003_kfifo_release(struct vs1003_data *dev)
 }
 
 /* --- file ops --- */
-static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
-{
-    struct vs1003_data *dev = vs1003_dev;
+static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos) {
+
+    struct vs1003_data *dev = file->private_data; 
     ssize_t written = 0;
+    // pr_debug("vs1003_write\n");
 
     if (count == 0)
         return 0;
 
+    // 유저공간의 요청 데이터 (count)
+    // 커널 버퍼에 복사함 
     while (written < count) {
+
+        // remain byte 계산
         size_t to_copy = min_t(size_t, count - written, (size_t)VS1003_MAX_BUFFER_SIZE);
         unsigned int copied = 0;
 
-        if (wait_event_interruptible(dev->wq_space,
-                                     kfifo_avail(&dev->fifo) > 0 ||
-                                     !READ_ONCE(dev->xfer_enabled)))
+        // fifo 공간이 생기거나, stream이 비활성화 될 때까지 대기
+        if (wait_event_interruptible(dev->wq_space, kfifo_avail(&dev->fifo) > 0 || !READ_ONCE(dev->xfer_enabled))) {
             return -ERESTARTSYS;
+        }
 
-        if (!dev->xfer_enabled)
+        if (!dev->xfer_enabled) {
             return -EPIPE;
+        }
 
-        mutex_lock(&dev->fifo_lock);
+        // 유저버퍼를 직접 KFIFO 버퍼에 복사함
+        mutex_lock(&dev->fifo_lock); 
         {
             int ret = kfifo_from_user(&dev->fifo, buf + written, to_copy, &copied);
             if (ret < 0) { mutex_unlock(&dev->fifo_lock); return ret; }
@@ -688,34 +698,49 @@ static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t co
         mutex_unlock(&dev->fifo_lock);
 
         written += copied;
+
+        // worker 깨움
         queue_work(dev->wq, &dev->xfer_work);
 
-        if (copied == 0)
+        // 쓰기 못한 경우 
+        if (copied == 0) {
             cond_resched();
+        }
     }
+
     return written;
 }
 
-static int vs1003_open(struct inode *inode, struct file *file)
-{
-    if (!mutex_trylock(&vs1003_dev->ctl_lock))
-        return -EBUSY;
-
-    if (vs1003_soft_reset(vs1003_dev) < 0) {
-        pr_warn("open: soft reset failed, try hard reset\n");
-        vs1003_force_hard_reset(vs1003_dev);
-        if (vs1003_soft_reset(vs1003_dev) < 0) {
-            pr_err("open: hard reset also failed\n");
-            mutex_unlock(&vs1003_dev->ctl_lock);
-            return -EIO;
-        }
-    }
+static int vs1003_release(struct inode *inode, struct file *file) {
+    struct vs1003_data *dev = file->private_data;
+    mutex_unlock(&dev->ctl_lock);
     return 0;
 }
 
-static int vs1003_release(struct inode *inode, struct file *file)
-{
-    mutex_unlock(&vs1003_dev->ctl_lock);
+
+
+static int vs1003_open(struct inode *inode, struct file *file) {
+
+    struct vs1003_data *dev = container_of(inode->i_cdev, struct vs1003_data, cdev);
+    file->private_data = dev;
+
+    pr_debug("vs1003_open\n");
+
+    if (!mutex_trylock(&dev->ctl_lock)) {
+        return -EBUSY;
+    }
+
+    if (vs1003_soft_reset(dev) < 0) {
+        pr_warn("vs1003_open: soft reset failed, trying hard reset\n");
+        vs1003_force_hard_reset(dev);
+
+        if (vs1003_soft_reset(dev) < 0) {
+            pr_err("vs1003_open: hard reset also failed\n");
+            mutex_unlock(&dev->ctl_lock);
+            return -EIO;
+        }
+    }
+
     return 0;
 }
 
@@ -726,83 +751,118 @@ static const struct file_operations vs1003_fops = {
     .release = vs1003_release,
 };
 
-/* --- module init/exit: my_spi 등록 + DT GPIO 획득 + char dev + sysfs --- */
-static int __init vs1003_init(void)
+static const struct of_device_id vs1003_of_match[] = {
+    { .compatible = "myspi,vs1003_raw", },
+    { }
+};
+MODULE_DEVICE_TABLE(of, vs1003_of_match);
+
+
+/* --- probe --- */
+static int vs1003_probe(struct platform_device *pdev)
 {
+    struct device *device = &pdev->dev;
+    struct vs1003_data *vs1003_dev = NULL;
     int ret = 0;
-    struct device_node *np = NULL;
 
-    vs1003_dev = kzalloc(sizeof(*vs1003_dev), GFP_KERNEL);
-    if (!vs1003_dev)
+    pr_info("vs1003_probe\n");
+
+    vs1003_dev = devm_kzalloc(device, sizeof(*vs1003_dev), GFP_KERNEL);
+    if (!vs1003_dev) {
+        pr_err("Failed to allocate memory for vs1003_data\n");
         return -ENOMEM;
+    }
 
-    mutex_init(&vs1003_dev->ctl_lock);
+    vs1003_dev->device = device;
     mutex_init(&vs1003_dev->spi_lock);
+    mutex_init(&vs1003_dev->ctl_lock);
+    mutex_init(&vs1003_dev->fifo_lock);
+    init_waitqueue_head(&vs1003_dev->wq_space);
+    atomic_set(&vs1003_dev->volume_pending, 0);
+    atomic_set(&vs1003_dev->play_state, 0);
 
-    /* my_spi init & register */
+    /* GPIOs */
+    vs1003_dev->xcs_gpio  = devm_gpiod_get(device, "xcs",  GPIOD_OUT_HIGH);
+    vs1003_dev->xdcs_gpio = devm_gpiod_get(device, "xdcs", GPIOD_OUT_HIGH);
+    vs1003_dev->dreq_gpio = devm_gpiod_get(device, "dreq", GPIOD_IN);
+    vs1003_dev->xrst_gpio = devm_gpiod_get_optional(device, "xrst", GPIOD_OUT_HIGH);
+
+    if (IS_ERR(vs1003_dev->xcs_gpio) || IS_ERR(vs1003_dev->xdcs_gpio) || IS_ERR(vs1003_dev->dreq_gpio)) {
+        pr_err("GPIOs missing\n");
+        return -EINVAL;
+    }
+
+    /* my_spi */
     my_spi_slave_init(&vs1003_dev->slave);
     vs1003_dev->slave.mode = MYSPI_MODE_0;
     ret = my_spi_register(&vs1003_dev->slave);
     if (ret != SPI_ERR_NONE) {
-        pr_err("my_spi_register failed (%d)\n", ret);
-        kfree(vs1003_dev);
-        vs1003_dev = NULL;
+        pr_err("my_spi_register failed\n");
         return -EIO;
     }
 
-
-    np = of_find_compatible_node(NULL, NULL, "chan,my-spi");
-    if (!np) {
-        pr_warn("DT node 'chan,my-spi' not found. GPIO via of_get_named_gpio will be skipped.\n");
-    } else {
-        int gpio;
-
-        gpio = of_get_named_gpio(np, GPIO_LABEL_XCS, 0);
-        if (gpio_is_valid(gpio))
-            vs1003_dev->xcs_gpio = gpio_to_desc(gpio);
-
-        gpio = of_get_named_gpio(np, GPIO_LABEL_XDCS, 0);
-        if (gpio_is_valid(gpio))
-            vs1003_dev->xdcs_gpio = gpio_to_desc(gpio);
-
-        gpio = of_get_named_gpio(np, GPIO_LABEL_DREQ, 0);
-        if (gpio_is_valid(gpio)) 
-            vs1003_dev->dreq_gpio = gpio_to_desc(gpio);
-
-        gpio = of_get_named_gpio(np, GPIO_LABEL_XRST, 0);
-        if (gpio_is_valid(gpio))
-            vs1003_dev->xrst_gpio = gpio_to_desc(gpio);
-    }
-
-    if (!vs1003_dev->dreq_gpio) {
-        pr_err("DREQ gpio is mandatory\n");
-        ret = -EINVAL;
-        goto err_mspi;
-    }
-    if (!vs1003_dev->xcs_gpio || !vs1003_dev->xdcs_gpio) {
-        pr_err("XCS/XDCS gpios are mandatory for VS1003\n");
-        ret = -EINVAL;
-        goto err_mspi;
-    }
-
-    /* char dev 등록 */
-    ret = alloc_chrdev_region(&vs1003_dev->devt, 0, 1, DEV_NAME);
+    /* chip init */
+    ret = vs1003_init_chip(vs1003_dev);
     if (ret < 0) {
-        pr_err("alloc_chrdev_region failed\n");
-        goto err_mspi;
+        pr_err("chip init failed: %d\n", ret);
+        goto err_spi;
+    }
+
+    /* kfifo / wq / irq */
+    ret = kfifo_alloc(&vs1003_dev->fifo, VS1003_FIFO_SIZE, GFP_KERNEL);
+    if (ret) {
+        pr_err("kfifo_alloc failed: %d\n", ret);
+        goto err_spi;
+    }
+
+    vs1003_dev->wq = alloc_workqueue("vs1003_wq", WQ_HIGHPRI|WQ_UNBOUND|WQ_MEM_RECLAIM, 1);
+    if (!vs1003_dev->wq) {
+        pr_err("alloc_workqueue failed\n");
+        ret = -ENOMEM;
+        goto err_fifo;
+    }
+
+    INIT_WORK(&vs1003_dev->xfer_work, vs1003_xfer_work);
+
+    vs1003_dev->dreq_irq = gpiod_to_irq(vs1003_dev->dreq_gpio);
+    if (vs1003_dev->dreq_irq < 0) {
+        pr_err("Failed to map DREQ GPIO to IRQ: %d\n", vs1003_dev->dreq_irq);
+        ret = vs1003_dev->dreq_irq;
+        goto err_wq;
+    }
+
+    ret = devm_request_threaded_irq(device, vs1003_dev->dreq_irq, NULL,
+                                    vs1003_dreq_irq_thread,
+                                    IRQF_ONESHOT | IRQF_TRIGGER_RISING,
+                                    "vs1003-dreq", vs1003_dev);
+    if (ret) {
+        pr_err("request irq failed: %d\n", ret);
+        goto err_wq;
+    }
+
+    vs1003_dev->xfer_enabled = true;
+    if (gpiod_get_value(vs1003_dev->dreq_gpio)) {
+        queue_work(vs1003_dev->wq, &vs1003_dev->xfer_work);
+    }
+
+    /* chardev */
+    ret = alloc_chrdev_region(&vs1003_dev->devt, 0, 1, DEV_NAME);
+    if (ret) {
+        pr_err("alloc_chrdev_region failed: %d\n", ret);
+        goto err_wq;
     }
 
     cdev_init(&vs1003_dev->cdev, &vs1003_fops);
     ret = cdev_add(&vs1003_dev->cdev, vs1003_dev->devt, 1);
-    if (ret < 0) {
-        pr_err("cdev_add failed\n");
-        goto err_chrdev;
+    if (ret) {
+        pr_err("cdev_add failed: %d\n", ret);
+        goto err_chr;
     }
 
-    vs1003_dev->class = class_create(DEV_NAME);
+    vs1003_dev->class = class_create(CLASS_NAME);
     if (IS_ERR(vs1003_dev->class)) {
-        pr_err("class_create failed\n");
         ret = PTR_ERR(vs1003_dev->class);
+        pr_err("class_create failed: %d\n", ret);
         vs1003_dev->class = NULL;
         goto err_cdev;
     }
@@ -811,89 +871,111 @@ static int __init vs1003_init(void)
     if (IS_ERR(vs1003_dev->device)) {
         pr_err("device_create failed\n");
         ret = PTR_ERR(vs1003_dev->device);
-        vs1003_dev->device = NULL;
         goto err_class;
     }
 
+    /* sysfs */
     dev_set_drvdata(vs1003_dev->device, vs1003_dev);
     ret = sysfs_create_group(&vs1003_dev->device->kobj, &vs1003_group);
     if (ret) {
-        pr_err("sysfs_create_group failed: %d\n", ret);
+        pr_err("sysfs group failed: %d\n", ret);
         goto err_device;
     }
 
-    /* 칩 초기화 */
-    ret = vs1003_init_chip(vs1003_dev);
-    if (ret < 0) {
-        pr_err("chip init failed\n");
-        goto err_sysfs;
-    }
-
-    /* 스트리밍 초기화 */
-    ret = vs1003_init_kfifo(vs1003_dev);
-    if (ret < 0) {
-        pr_err("kfifo init failed\n");
-        goto err_sysfs;
-    }
-
-    /* 간단한 자가 테스트 (원하면 주석처리 가능) */
-    vs1003_diag_selftest(vs1003_dev);
-
-    pr_info("VS1003 my_spi driver initialized\n");
+    platform_set_drvdata(pdev, vs1003_dev);
+    pr_info("VS1003 my_spi driver initialized successfully\n");
     return 0;
 
-err_sysfs:
-    if (vs1003_dev->device)
-        sysfs_remove_group(&vs1003_dev->device->kobj, &vs1003_group);
 err_device:
-    if (vs1003_dev->device)
+    if (vs1003_dev->device) {
         device_destroy(vs1003_dev->class, vs1003_dev->devt);
+    }
 err_class:
-    if (vs1003_dev->class)
+    if (vs1003_dev->class) {
         class_destroy(vs1003_dev->class);
+    }
 err_cdev:
     cdev_del(&vs1003_dev->cdev);
-err_chrdev:
+err_chr:
     unregister_chrdev_region(vs1003_dev->devt, 1);
-err_mspi:
-    my_spi_unregister(&vs1003_dev->slave);
-    if (vs1003_dev) {
-        kfree(vs1003_dev);
-        vs1003_dev = NULL;
+err_wq:
+    if (vs1003_dev->wq) {
+        flush_workqueue(vs1003_dev->wq);
+        destroy_workqueue(vs1003_dev->wq);
     }
+err_fifo:
+    kfifo_free(&vs1003_dev->fifo);
+err_spi:
+    my_spi_unregister(&vs1003_dev->slave);
     return ret;
 }
 
-static void __exit vs1003_exit(void)
-{
-    pr_info("VS1003 my_spi driver exit\n");
+/* --- remove --- */
+static void vs1003_remove(struct platform_device *pdev) {
 
-    if (!vs1003_dev)
+    pr_debug("vs1003_remove\n");
+
+    struct vs1003_data *dev = platform_get_drvdata(pdev);
+
+    if (!dev) {
         return;
+    }
 
-    /* 스트리밍 종료 */
-    vs1003_kfifo_stop(vs1003_dev);
-    vs1003_kfifo_release(vs1003_dev);
+    /* stop streaming */
+    WRITE_ONCE(dev->xfer_enabled, false);
+    synchronize_irq(dev->dreq_irq);
+    flush_work(&dev->xfer_work);
+
+    if (dev->wq) { 
+        flush_workqueue(dev->wq); 
+        destroy_workqueue(dev->wq); 
+    }
+
+    kfifo_free(&dev->fifo);
 
     /* sysfs / chardev */
-    if (vs1003_dev->device)
-        sysfs_remove_group(&vs1003_dev->device->kobj, &vs1003_group);
+    if (dev->device) {
+        sysfs_remove_group(&dev->device->kobj, &vs1003_group);
+    }
 
-    if (vs1003_dev->device)
-        device_destroy(vs1003_dev->class, vs1003_dev->devt);
-    if (vs1003_dev->class)
-        class_destroy(vs1003_dev->class);
-    cdev_del(&vs1003_dev->cdev);
-    unregister_chrdev_region(vs1003_dev->devt, 1);
+    if (dev->device) {
+        device_destroy(dev->class, dev->devt);
+    }
 
-    /* my_spi */
-    my_spi_unregister(&vs1003_dev->slave);
+    if (dev->class) {
+        class_destroy(dev->class);
+    }
 
-    /* GPIO descs 는 of_get_named_gpio + gpio_to_desc 로 얻어와서 put 생략 가능
-       (필요시 gpiod_put 호출 추가) */
+    cdev_del(&dev->cdev);
+    unregister_chrdev_region(dev->devt, 1);
 
-    kfree(vs1003_dev);
-    vs1003_dev = NULL;
+    my_spi_unregister(&dev->slave);
+
+    return;
+}
+
+
+static struct platform_driver vs1003_driver = {
+    .probe = vs1003_probe,
+    .remove = vs1003_remove,
+    .driver = {
+        .name = DEV_NAME,
+        .of_match_table = vs1003_of_match,
+    },
+};
+
+
+static int __init vs1003_init(void) {
+
+    pr_info("vs1003_init\n");
+
+    return platform_driver_register(&vs1003_driver);
+}
+
+static void __exit vs1003_exit(void) {
+    pr_info("vs1003_exit\n");
+
+    platform_driver_unregister(&vs1003_driver);
 }
 
 module_init(vs1003_init);
@@ -901,4 +983,4 @@ module_exit(vs1003_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("chan");
-MODULE_DESCRIPTION("VS1003 Linux Character Driver using my_spi");
+MODULE_DESCRIPTION("VS1003 Character Driver using my_spi");

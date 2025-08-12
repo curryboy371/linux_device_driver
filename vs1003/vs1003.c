@@ -70,7 +70,6 @@ struct vs1003_data {
     atomic_t play_state;            // 재생 상태
 };
 
-static struct vs1003_data *vs1003_dev;
 
 static int vs1003_diag_selftest(struct vs1003_data *dev);
 
@@ -800,7 +799,8 @@ static void vs1003_kfifo_release(struct vs1003_data *dev) {
 
 static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos) {
 
-    struct vs1003_data *dev = vs1003_dev;
+    struct vs1003_data *dev = file->private_data; 
+
     ssize_t written = 0;
 
     // pr_debug("vs1003_write\n");
@@ -849,19 +849,22 @@ static ssize_t vs1003_write(struct file *file, const char __user *buf, size_t co
 
 static int vs1003_open(struct inode *inode, struct file *file) {
 
+    struct vs1003_data *dev = container_of(inode->i_cdev, struct vs1003_data, cdev);
+    file->private_data = dev;
+
     pr_debug("vs1003_open\n");
 
-    if (!mutex_trylock(&vs1003_dev->ctl_lock)) {
+    if (!mutex_trylock(&dev->ctl_lock)) {
         return -EBUSY;
     }
 
-    if (vs1003_soft_reset(vs1003_dev) < 0) {
+    if (vs1003_soft_reset(dev) < 0) {
         pr_warn("vs1003_open: soft reset failed, trying hard reset\n");
-        vs1003_force_hard_reset(vs1003_dev);
+        vs1003_force_hard_reset(dev);
 
-        if (vs1003_soft_reset(vs1003_dev) < 0) {
+        if (vs1003_soft_reset(dev) < 0) {
             pr_err("vs1003_open: hard reset also failed\n");
-            mutex_unlock(&vs1003_dev->ctl_lock);
+            mutex_unlock(&dev->ctl_lock);
             return -EIO;
         }
     }
@@ -870,8 +873,8 @@ static int vs1003_open(struct inode *inode, struct file *file) {
 
 static int vs1003_release(struct inode *inode, struct file *file) {
     pr_debug("vs1003_release\n");
-
-    mutex_unlock(&vs1003_dev->ctl_lock);
+    struct vs1003_data *dev = file->private_data;
+    mutex_unlock(&dev->ctl_lock);
     return 0;
 }
 
@@ -885,17 +888,25 @@ static const struct file_operations vs1003_fops = {
 static int vs1003_probe(struct spi_device *spi) {
 
     pr_debug("vs1003_probe\n");
-    int ret;
-    struct device *dev = &spi->dev;
 
-    vs1003_dev = devm_kzalloc(dev, sizeof(*vs1003_dev), GFP_KERNEL);
-    if (!vs1003_dev)
+    struct device *device = &spi->dev;
+    struct vs1003_data *vs1003_dev = NULL;
+    int ret = 0;
+
+    /* --- alloc / init --- */
+    vs1003_dev = devm_kzalloc(device, sizeof(*vs1003_dev), GFP_KERNEL);
+    if (!vs1003_dev) {
+        pr_err("Failed to allocate vs1003_data\n");
         return -ENOMEM;
+    }
+    vs1003_dev->device = device;
+    vs1003_dev->spi = spi;
 
+    /* --- SPI 설정 --- */
     spi->mode = SPI_MODE_0;
-    spi->mode |= SPI_NO_CS; // CS 비활성
-    spi->max_speed_hz = VS1003_STREAM_HZ;
     spi->bits_per_word = 8;
+    spi->max_speed_hz  = VS1003_STREAM_HZ;
+    spi->mode |= SPI_NO_CS; /* HW CS 미사용(개별 GPIO로 XCS/XDCS 제어) */
 
     ret = spi_setup(spi);
     if (ret) {
@@ -903,30 +914,29 @@ static int vs1003_probe(struct spi_device *spi) {
         return ret;
     }
 
-    vs1003_dev->spi = spi;
     mutex_init(&vs1003_dev->ctl_lock);
     mutex_init(&vs1003_dev->spi_lock);
 
     /* GPIO 설정 */
-    vs1003_dev->dreq_gpio = devm_gpiod_get(dev, "dreq", GPIOD_IN);
+    vs1003_dev->dreq_gpio = devm_gpiod_get(device, "dreq", GPIOD_IN);
     if (IS_ERR(vs1003_dev->dreq_gpio)) {
         pr_err("vs1003_probe: failed to get dreq gpio\n");
         return PTR_ERR(vs1003_dev->dreq_gpio);
     }
 
-    vs1003_dev->xcs_gpio = devm_gpiod_get(dev, "xcs", GPIOD_OUT_LOW);
+    vs1003_dev->xcs_gpio = devm_gpiod_get(device, "xcs", GPIOD_OUT_LOW);
     if (IS_ERR(vs1003_dev->xcs_gpio)) {
         pr_err("vs1003_probe: failed to get xcs gpio\n");
         return PTR_ERR(vs1003_dev->xcs_gpio);
     }
 
-    vs1003_dev->xdcs_gpio = devm_gpiod_get(dev, "xdcs", GPIOD_OUT_LOW);
+    vs1003_dev->xdcs_gpio = devm_gpiod_get(device, "xdcs", GPIOD_OUT_LOW);
     if (IS_ERR(vs1003_dev->xdcs_gpio)) {
         pr_err("vs1003_probe: failed to get xdcs gpio\n");
         return PTR_ERR(vs1003_dev->xdcs_gpio);
     }
 
-    vs1003_dev->xrst_gpio = devm_gpiod_get(dev, "xrst", GPIOD_OUT_HIGH);
+    vs1003_dev->xrst_gpio = devm_gpiod_get(device, "xrst", GPIOD_OUT_HIGH);
     if (IS_ERR(vs1003_dev->xrst_gpio)) {
         pr_err("vs1003_probe: failed to get xrst gpio\n");
         return PTR_ERR(vs1003_dev->xrst_gpio);
@@ -982,6 +992,7 @@ static int vs1003_probe(struct spi_device *spi) {
         goto err_sysfs;
     }
 
+    spi_set_drvdata(spi, vs1003_dev);
 
     vs1003_diag_selftest(vs1003_dev);
 
@@ -1005,14 +1016,21 @@ static void vs1003_remove(struct spi_device *spi) {
 
     pr_debug("vs1003_remove\n");
 
+    struct vs1003_data *vs1003_dev = spi_get_drvdata(spi);
+    if (!vs1003_dev) {
+        pr_err("vs1003_remove: vs1003_dev null\n");
+        return;
+    }
+
     flush_work(&vs1003_dev->xfer_work);
 
     vs1003_kfifo_stop(vs1003_dev);
 
     vs1003_kfifo_release(vs1003_dev);
 
-    if (vs1003_dev->device)
+    if (vs1003_dev->device) {
         sysfs_remove_group(&vs1003_dev->device->kobj, &vs1003_group);
+    }
 
     device_destroy(vs1003_dev->class, vs1003_dev->devt);
     class_destroy(vs1003_dev->class);

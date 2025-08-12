@@ -48,7 +48,7 @@ typedef struct my_spi_data {
     struct gpio_desc* sclk_dec;   // 클럭
     struct gpio_desc* mosi_dec;   // 데이터 출력 (컨트롤러 → 주변장치)
     struct gpio_desc* miso_dec;   // 데이터 입력 (주변장치 → 컨트롤러)
-    struct gpio_desc* cs_dec;     // 슬레이브 선택 (active-low)
+    //struct gpio_desc* cs_dec;     // 슬레이브 선택 (active-low)
 
     int max_speed_hz; // max speed 
     
@@ -309,7 +309,7 @@ static SPI_error_t my_spi_set_cs(spi_select_t slave_id, bool active) {
         return SPI_ERR_INVALID_ID;
     }
 
-    gpiod_set_value(g_my_spi_data->cs_dec, active);
+    // gpiod_set_value(g_my_spi_data->cs_dec, active);
 
     if(!active) {
         g_my_spi_data->selected_slave_id = slave_id;
@@ -512,11 +512,11 @@ static int my_spi_probe(struct platform_device *pdev) {
         return PTR_ERR(data->miso_dec);
     }
 
-    data->cs_dec = devm_gpiod_get(dev, SPI_CS_GPIO_NAME, GPIOD_IN);
-    if (IS_ERR(data->cs_dec)) {
-        pr_err("Failed to get cs_dec: %ld\n", PTR_ERR(data->cs_dec));
-        return PTR_ERR(data->cs_dec);
-    }
+    // data->cs_dec = devm_gpiod_get(dev, SPI_CS_GPIO_NAME, GPIOD_IN);
+    // if (IS_ERR(data->cs_dec)) {
+    //     pr_err("Failed to get cs_dec: %ld\n", PTR_ERR(data->cs_dec));
+    //     return PTR_ERR(data->cs_dec);
+    // }
 
     // spi 초기 값 설정
     data->selected_slave_id = SPI_SLAVE_MAX;

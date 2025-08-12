@@ -61,7 +61,7 @@
 /* VS1003 Default Values */
 #define VS1003_DEFAULT_CLOCKF   0x8800 // 기본 클록 값
 #define VS1003_DEFAULT_AUDATA   0xAC45 // 기본 오디오 데이터값
-#define VS1003_DEFAULT_VOLUME_PER 70   // 기본 볼륨값 - 퍼센트
+#define VS1003_DEFAULT_VOLUME_PER 75   // 기본 볼륨값 - 퍼센트
 
 
 typedef enum vs1003_playstate {

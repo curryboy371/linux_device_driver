@@ -1,0 +1,26 @@
+/dts-v1/;
+/plugin/;
+/{
+    compatible = "brcm,bcm2711";
+
+    fragment@0 {
+        target-path = "/soc/myspi";
+        __overlay__ {
+
+            #address-cells = <1>;
+            #size-cells    = <0>;
+
+            vs1003@0 {
+                compatible = "myspi,vs1003_raw";  /* 드라이버와 동일하게 */
+                reg = <0>;                        /* #address-cells=1 이므로 1셀 */
+                status = "okay";
+
+                xcs-gpios  = <&gpio 18 1>;
+                xdcs-gpios = <&gpio 25 1>;
+                dreq-gpios = <&gpio 24 0>;
+                xrst-gpios = <&gpio 23 0>;
+                speed-hz   = <2000000>;
+            };
+        };
+    };
+};
