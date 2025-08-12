@@ -14,9 +14,9 @@
                 #address-cells = <1>;
                 #size-cells = <0>;
 
-                myspi-sclk-gpios = <&gpio 5 0>;
-                myspi-mosi-gpios = <&gpio 6 0>;
-                myspi-miso-gpios = <&gpio 13 0>;
+                myspi-mosi-gpios = <&gpio 5 0>;
+                myspi-miso-gpios = <&gpio 6 0>;
+                myspi-sclk-gpios = <&gpio 13 0>;
             };
         };
     };

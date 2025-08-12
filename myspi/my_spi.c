@@ -118,8 +118,8 @@ SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_transfer_t* xfer
     my_spi_message_add_tail(xfer, &message);
 
 
-    // CS 활성화
-    my_spi_set_cs(slave_data->slave_id, LOW);
+    // CS 활성화 = 외부에서 
+    //my_spi_set_cs(slave_data->slave_id, LOW);
     udelay(SPI_DELAY_US);
 
     // 순회시 현재 노드를 가리킬 포인터
@@ -143,9 +143,9 @@ SPI_error_t my_spi_sync(my_spi_slave_data_t* slave_data, my_spi_transfer_t* xfer
         }
     }
 
-    // CS 비활성화
+    // CS 비활성화 = 외부에서
     udelay(SPI_DELAY_US);
-    my_spi_set_cs(slave_data->slave_id, HIGH);
+    //my_spi_set_cs(slave_data->slave_id, HIGH);
 
     // 메시지 정리
     my_spi_message_cleanup(&message);
@@ -494,13 +494,13 @@ static int my_spi_probe(struct platform_device *pdev) {
         
     // device tree gpio와 매칭
     // devm은 리소스 자동 관리
-    data->sclk_dec = devm_gpiod_get(dev, SPI_SCLK_GPIO_NAME, GPIOD_IN);
+    data->sclk_dec = devm_gpiod_get(dev, SPI_SCLK_GPIO_NAME, GPIOD_OUT_LOW);
     if (IS_ERR(data->sclk_dec)) {
         pr_err("Failed to get sclk_dec: %ld\n", PTR_ERR(data->sclk_dec));
         return PTR_ERR(data->sclk_dec);
     }
 
-    data->mosi_dec = devm_gpiod_get(dev, SPI_MOSI_GPIO_NAME, GPIOD_IN);
+    data->mosi_dec = devm_gpiod_get(dev, SPI_MOSI_GPIO_NAME, GPIOD_OUT_LOW);
     if (IS_ERR(data->mosi_dec)) {
         pr_err("Failed to get mosi_dec: %ld\n", PTR_ERR(data->mosi_dec));
         return PTR_ERR(data->mosi_dec);

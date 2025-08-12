@@ -7,7 +7,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#define VS1003_DEVICE "/dev/vs1003"
+#define VS1003_DEVICE "/dev/vs1003_raw"
 #define BUFFER_SIZE 8192
 
 int main(int argc, char *argv[]) {

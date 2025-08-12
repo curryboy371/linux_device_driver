@@ -30,13 +30,13 @@
     사용법
 
     // 볼륨 확인
-    cat /sys/class/vs1003_class/vs1003/volume
+    cat /sys/class/vs1003_raw_class/vs1003_raw/volume
 
     // 볼륨 설정 (percent)
-    echo 75 | sudo tee /sys/class/vs1003_class/vs1003/volume
+    echo 75 | sudo tee /sys/class/vs1003_raw_class/vs1003_raw/volume
 
     // 스트리밍
-    cat music.mp3 | sudo tee /dev/vs1003 > /dev/null
+    cat music.mp3 | sudo tee /dev/vs1003_raw > /dev/null
 */
 
 /* Device Name */
@@ -86,8 +86,6 @@ struct vs1003_data {
     /* state */
     atomic_t play_state;
 };
-
-static struct vs1003_data *vs1003_dev;
 
 static int  vs1003_wait_dreq(struct vs1003_data *dev, int usec_timeout);
 static int  vs1003_write_sci(struct vs1003_data *dev, uint8_t addr, uint16_t data, bool bwait);
@@ -438,28 +436,35 @@ static int vs1003_soft_reset(struct vs1003_data *dev)
     }
 
     ret = vs1003_write_sci(dev, SCI_CLOCKF, VS1003_DEFAULT_CLOCKF, true);
-    if (ret < 0) return ret;
+    if (ret < 0) {
+        return ret;
+    }
     msleep(1);
     ret = vs1003_read_sci(dev, SCI_CLOCKF, &val);
-    if (ret < 0 || val != VS1003_DEFAULT_CLOCKF)
-        pr_warn("SCI_CLOCKF mismatch: exp=0x%04x got=0x%04x\n",
-                VS1003_DEFAULT_CLOCKF, val);
+    if (ret < 0 || val != VS1003_DEFAULT_CLOCKF) {
+        pr_warn("SCI_CLOCKF mismatch: exp=0x%04x got=0x%04x\n", VS1003_DEFAULT_CLOCKF, val);
+    }
 
     ret = vs1003_write_sci(dev, SCI_AUDATA, VS1003_DEFAULT_AUDATA, true);
-    if (ret < 0) return ret;
+    if (ret < 0) {
+        return ret;
+    }
     msleep(1);
     ret = vs1003_read_sci(dev, SCI_AUDATA, &val);
-    if (ret < 0 || val != VS1003_DEFAULT_AUDATA)
-        pr_warn("SCI_AUDATA mismatch: exp=0x%04x got=0x%04x\n",
-                VS1003_DEFAULT_AUDATA, val);
+    if (ret < 0 || val != VS1003_DEFAULT_AUDATA) {
+        pr_warn("SCI_AUDATA mismatch: exp=0x%04x got=0x%04x\n", VS1003_DEFAULT_AUDATA, val);
+    }
 
     ret = vs1003_write_sci(dev, SCI_VOL, dev->volume_byte, true);
-    if (ret < 0) return ret;
+    if (ret < 0) {
+        return ret;
+    }
+
     msleep(1);
     ret = vs1003_read_sci(dev, SCI_VOL, &val);
-    if (ret < 0 || val != dev->volume_byte)
-        pr_warn("SCI_VOL mismatch: exp=0x%04x got=0x%04x\n",
-                dev->volume_byte, val);
+    if (ret < 0 || val != dev->volume_byte) {
+        pr_warn("SCI_VOL mismatch: exp=0x%04x got=0x%04x\n", dev->volume_byte, val);
+    }
 
     return 0;
 }
@@ -883,6 +888,9 @@ static int vs1003_probe(struct platform_device *pdev)
     }
 
     platform_set_drvdata(pdev, vs1003_dev);
+
+    vs1003_diag_selftest(vs1003_dev);
+
     pr_info("VS1003 my_spi driver initialized successfully\n");
     return 0;
 
